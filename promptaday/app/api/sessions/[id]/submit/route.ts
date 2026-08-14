@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { SessionStatus, Visibility } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { EMPTY_DOCUMENT } from "@/lib/richText";
+import { computeNextStreak } from "@/lib/streak";
 
 export async function POST(
   request: NextRequest,
@@ -27,6 +28,14 @@ export async function POST(
   const sources = Array.isArray(body?.sources)
     ? body.sources.filter((s: unknown): s is string => typeof s === "string" && s.trim().length > 0)
     : [];
+
+  // Read outside the transaction to decide the new streak value — same
+  // non-transactional-read posture as /start's already-submitted-today
+  // check; this is a single-user app so the race window isn't a practical
+  // concern (see "/start and /reroll hardening" in CLAUDE.md for the same
+  // trade-off elsewhere).
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: session.userId } });
+  const nextStreak = await computeNextStreak(prisma, user, session);
 
   // FOR_YOU is the only functional visibility in v1; any requested value is
   // ignored in favor of the default rather than rejected, since the UI never
@@ -54,11 +63,16 @@ export async function POST(
       where: { id: session.id },
       data: { status: SessionStatus.SUBMITTED },
     }),
+    prisma.user.update({
+      where: { id: user.id },
+      data: { currentStreak: nextStreak },
+    }),
   ]);
 
   return NextResponse.json({
     id: entry.id,
     sessionId: session.id,
     status: "submitted",
+    currentStreak: nextStreak,
   });
 }

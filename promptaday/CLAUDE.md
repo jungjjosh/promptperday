@@ -1,7 +1,7 @@
 # promptperday — Project Reference
 
 This is the standing source of truth for this project. It describes everything
-built so far (Phases 1–5) in enough detail that a skilled developer could
+built so far (Phases 1–6) in enough detail that a skilled developer could
 recreate the project from scratch without guessing at a decision: the stack,
 the exact data model and why each field exists, every API route's contract,
 the BEGIN tab's UI architecture, and every deliberate simplification or
@@ -67,8 +67,7 @@ Google Docs export, social feed, and any functional Friends/Public visibility
   the day is computed in the user's stored IANA timezone, not the server's.
 - A session's day-of-record is when it was *started* ("Begin" pressed), not
   when it ends — a session begun at 11:58pm and finished after midnight still
-  counts for the earlier day. See "Streak semantics" below; streak logic
-  itself isn't built yet.
+  counts for the earlier day. See "Streak semantics" below.
 - Deleting the current day's in-progress draft lets the user start over the
   same day. Deleting a **past** day's entry (not built yet — will live in
   HISTORY) does *not* retroactively affect the streak: the streak is a
@@ -76,13 +75,60 @@ Google Docs export, social feed, and any functional Friends/Public visibility
   recomputed by scanning history. Streak only resets to 0 when a day ends
   with no submitted entry.
 
-### Streak semantics (confirmed, not yet implemented)
+### Streak semantics — implemented in Phase 6
 
-No streak counter exists yet — Phase 3 doesn't touch it. When it's built, it
-must be a persisted, independently-maintained value (e.g.
-`User.currentStreak`), *not* derived by counting `Entry`/`Session` rows,
-because of the delete-a-past-entry rule above: deleting old content must not
-change a streak that was already earned.
+`User.currentStreak` (`Int @default(0)`) is a persisted,
+independently-maintained value, *not* derived by counting `Entry`/`Session`
+rows — see the delete-a-past-entry rule above: deleting old content must not
+change a streak that was already earned. It's updated in exactly one place:
+[`lib/streak.ts`](lib/streak.ts)'s `computeNextStreak`, called from
+`POST /api/sessions/:id/submit`.
+
+**No background job.** There's no scheduler resetting streaks at midnight
+for users who missed a day (consistent with this project's existing
+no-in-process-scheduler posture — see "Question sourcing and review"
+below). Instead the check is lazy: at submission time, `computeNextStreak`
+looks up only the single most recently `SUBMITTED` session for the user
+(one bounded, indexed query — not a history scan) and compares its local
+day (via `localDateKey`, the same helper `/start` uses) to the local day
+immediately before the session being submitted. If they match, the streak
+continues (`currentStreak + 1`); otherwise — first-ever submission, or any
+size of gap — today's submission starts a fresh 1-day streak
+(`currentStreak = 1`, confirmed with the user rather than assumed: a gap
+resets state, but the day just submitted still always counts as a 1-day
+streak rather than showing 0 until the following day).
+
+**Day-of-record, not wall-clock time.** The "local day" used is always
+`session.startedAt` — the same field that governs the one-submission-per-day
+rule (see "Session rules" above) — never the real time `computeNextStreak`
+happens to run at. A session begun at 11:58pm and submitted after midnight
+still extends (or breaks) the streak as if it happened on the day it
+started.
+
+**DST-safe by construction.** `lib/streak.ts`'s `previousDateKey` computes
+"the calendar day before X" via arithmetic on the Y/M/D fields of a
+UTC-anchored scratch `Date` (`Date.UTC(y, m-1, d)`, then
+`setUTCDate(d - 1)`), not by subtracting 86,400,000ms from a real instant
+and reformatting. A local calendar day isn't always 24 real hours across a
+DST transition (23 or 25), so the naive subtraction approach can land on
+the wrong local calendar date for early-morning timestamps right around the
+transition — verified by a dedicated test in
+[`tests/streak.test.ts`](tests/streak.test.ts) using a real
+America/New_York spring-forward date (2026-03-08).
+
+### Testing (streak)
+
+[`tests/streak.test.ts`](tests/streak.test.ts) calls the real
+`POST /api/sessions/:id/submit` route handler (with the system clock mocked
+via `vi.useFakeTimers()` / `vi.setSystemTime()`) for every case, rather than
+calling `computeNextStreak` directly, so the tests exercise the exact logic
+the app uses in production — one test explicitly confirms
+`computeNextStreak` is that same function. Covers: normal consecutive-day
+increments (1 → 2 → 3), a missed day resetting the next submission to 1
+(not continuing the prior increment), a session started before midnight and
+submitted after correctly extending the streak by its *start* day rather
+than the day it happened to be submitted on, and the DST spring-forward
+case described above.
 
 ## Tech stack
 
@@ -169,6 +215,8 @@ specified while keeping idiomatic TypeScript on the application side.
 ### Models, as originally specified (Phase 1)
 
 - **User** — `id, email, timezone, prepDurationMinutes (default 10), createdAt`
+  — plus `currentStreak (default 0)`, added in Phase 6 (see "Streak
+  semantics" below), beyond the original Phase 1 field list
 - **Category** — `id, name, enabledByDefault`
 - **Question** — `id, categoryId, text, sourceType (curated | ai_generated |
   news_derived), status (pending_review | approved | archived), createdAt`
@@ -302,8 +350,12 @@ Body: `{ title?, description?, sources?: string[] }`
   title/description/sources, and forces `visibility = FOR_YOU` regardless of
   what's sent — no other value is functional in v1, so it's silently
   normalized rather than rejected.
-- Sets `Session.status = SUBMITTED` in the same transaction.
-- 200, body: `{ id, sessionId, status: "submitted" }`.
+- Sets `Session.status = SUBMITTED` in the same transaction. Also updates
+  `User.currentStreak` in that same transaction — see "Streak semantics"
+  above; the new value is read (non-transactionally, same trade-off as
+  `/start`'s already-submitted-today check) via
+  `computeNextStreak` before the transaction starts.
+- 200, body: `{ id, sessionId, status: "submitted", currentStreak }`.
 - **No deadline check** — can technically be called during prep or write,
   since the only UI path that calls it is the submission screen, which only
   appears after the write timer expires. Not gated server-side because
@@ -788,9 +840,11 @@ phase — Phase 2 and Phase 5's backend logic now both have direct coverage.
 
 - **No auth** — single hardcoded default user (see above). Required before
   multi-user or public deployment.
-- **No streak counter** — rules are confirmed (see "Streak semantics") but
-  no field or logic exists yet. HISTORY doesn't show a streak number, only
-  the calendar.
+- **Streak is tracked but not yet displayed** — `User.currentStreak` is
+  computed and persisted on every submission (see "Streak semantics"), but
+  no UI surfaces it yet; HISTORY still shows only the calendar, no streak
+  number. `POST /api/sessions/:id/submit` already returns the value in its
+  response, so wiring up a display is UI-only.
 - **Category preferences are global, not per-user** —
   `Category.enabledByDefault` is a single column on `Category`, toggled
   directly by SETTINGS. Fine for a single-user app (see "No auth in v1");

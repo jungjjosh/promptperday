@@ -41,6 +41,11 @@ model User {
   email               String   @unique
   timezone            String
   prepDurationMinutes Int      @default(10) @map("prep_duration_minutes")
+  // Persisted, independently-maintained (Phase 6) — not derived by counting
+  // Session/Entry rows, so deleting a past day's entry never retroactively
+  // changes a streak that was already earned. Updated only at submission
+  // time (lazily, no background job) via lib/streak.ts.
+  currentStreak       Int      @default(0) @map("current_streak")
   createdAt           DateTime @default(now()) @map("created_at")
 
   sessions        Session[]
