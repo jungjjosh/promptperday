@@ -82,6 +82,10 @@ model Session {
   userId      String        @map("user_id")
   categoryId  String        @map("category_id")
   questionId  String        @map("question_id")
+  // Not in the original Phase 1 field list; added because the "one session
+  // per local calendar day" check needs the actual begin-time, and prepEndsAt
+  // drifts across midnight depending on prep duration so can't stand in for it.
+  startedAt   DateTime      @default(now()) @map("started_at")
   prepEndsAt  DateTime      @map("prep_ends_at")
   writeEndsAt DateTime      @map("write_ends_at")
   rerollUsed  Boolean       @default(false) @map("reroll_used")
