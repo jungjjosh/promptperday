@@ -1,0 +1,128 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SourceType {
+  CURATED      @map("curated")
+  AI_GENERATED @map("ai_generated")
+  NEWS_DERIVED @map("news_derived")
+}
+
+enum QuestionStatus {
+  PENDING_REVIEW @map("pending_review")
+  APPROVED       @map("approved")
+  ARCHIVED       @map("archived")
+}
+
+enum SessionStatus {
+  PREPPING  @map("prepping")
+  WRITING   @map("writing")
+  SUBMITTED @map("submitted")
+}
+
+// FOR_YOU is the only visibility functional in v1 and is treated as private
+// to the author; FRIENDS/PUBLIC are modeled now but not enforced yet.
+enum Visibility {
+  FOR_YOU @map("for_you")
+  FRIENDS @map("friends")
+  PUBLIC  @map("public")
+}
+
+model User {
+  id                  String   @id @default(cuid())
+  email               String   @unique
+  timezone            String
+  prepDurationMinutes Int      @default(10) @map("prep_duration_minutes")
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  sessions        Session[]
+  entries         Entry[]
+  questionHistory UserQuestionHistory[]
+
+  @@map("users")
+}
+
+model Category {
+  id               String  @id @default(cuid())
+  name             String  @unique
+  enabledByDefault Boolean @default(true) @map("enabled_by_default")
+
+  questions Question[]
+  sessions  Session[]
+
+  @@map("categories")
+}
+
+model Question {
+  id         String         @id @default(cuid())
+  categoryId String         @map("category_id")
+  text       String
+  sourceType SourceType     @map("source_type")
+  status     QuestionStatus @default(PENDING_REVIEW)
+  createdAt  DateTime       @default(now()) @map("created_at")
+
+  category Category               @relation(fields: [categoryId], references: [id])
+  sessions Session[]
+  history  UserQuestionHistory[]
+
+  @@index([categoryId])
+  @@map("questions")
+}
+
+model Session {
+  id          String        @id @default(cuid())
+  userId      String        @map("user_id")
+  categoryId  String        @map("category_id")
+  questionId  String        @map("question_id")
+  prepEndsAt  DateTime      @map("prep_ends_at")
+  writeEndsAt DateTime      @map("write_ends_at")
+  rerollUsed  Boolean       @default(false) @map("reroll_used")
+  graceUsed   Boolean       @default(false) @map("grace_used")
+  status      SessionStatus @default(PREPPING)
+
+  user     User     @relation(fields: [userId], references: [id])
+  category Category @relation(fields: [categoryId], references: [id])
+  question Question @relation(fields: [questionId], references: [id])
+  entry    Entry?
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model Entry {
+  id          String     @id @default(cuid())
+  sessionId   String     @unique @map("session_id")
+  userId      String     @map("user_id")
+  title       String?
+  description String?
+  visibility  Visibility @default(FOR_YOU)
+  content     Json
+  sources     String[]
+  createdAt   DateTime   @default(now()) @map("created_at")
+
+  session Session @relation(fields: [sessionId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("entries")
+}
+
+model UserQuestionHistory {
+  userId     String   @map("user_id")
+  questionId String   @map("question_id")
+  shownAt    DateTime @default(now()) @map("shown_at")
+
+  user     User     @relation(fields: [userId], references: [id])
+  question Question @relation(fields: [questionId], references: [id])
+
+  @@id([userId, questionId, shownAt])
+  @@map("user_question_history")
+}
