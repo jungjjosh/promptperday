@@ -1,6 +1,6 @@
 # promptperday — Project Reference
 
-This document describes everything built so far (Phases 1–4) in enough detail that a
+This document describes everything built so far (Phases 1–5) in enough detail that a
 skilled developer could recreate the project from scratch without guessing at a
 decision. It covers the stack, the exact data model and why each field exists, every
 API route's contract, the BEGIN tab's UI architecture, and every deliberate
@@ -68,6 +68,7 @@ above: deleting old content must not change a streak that was already earned.
 | Rich text | TipTap | 3.30.1 (`@tiptap/react`, `@tiptap/core`, `@tiptap/pm`, `@tiptap/starter-kit`, `@tiptap/extension-text-style`, `@tiptap/extension-character-count`) | TipTap v3 is current stable; v2-era extension packages (`@tiptap/extension-color`, `@tiptap/extension-font-family`) are now folded into `@tiptap/extension-text-style` — install those separately and you'll get duplicate/conflicting `TextStyle` marks. |
 | Tests | Vitest | 4.1.10 | Runs against a real second Postgres database, not mocks — see "Testing" below. |
 | Lint | ESLint | 8.57.1 (`eslint-config-next@14`) | Pinned to v8 because `eslint-config-next@14` doesn't support ESLint 9's flat config; `create-next-app` scaffolds ESLint 9 by default. |
+| LLM | `@anthropic-ai/sdk` | 0.117.1, model `claude-opus-5` | Phase 5's AI-generated-question job. Structured output via `client.messages.parse()` + `zodOutputFormat` (needs `zod` ^4, installed alongside). |
 
 ### Why Prisma 6, not 7
 
@@ -105,6 +106,12 @@ createdb promptperday_test  # test database (Vitest's globalSetup migrates/seeds
 # 3. Environment files (gitignored — not committed)
 echo 'DATABASE_URL="postgresql://<you>@localhost:5432/promptperday?schema=public"' > .env
 echo 'DATABASE_URL="postgresql://<you>@localhost:5432/promptperday_test?schema=public"' > .env.test
+# Only needed to actually run the Phase 5 jobs (not needed for the rest of
+# the app, and the test suite mocks both — see .env.test's NEWS_API_KEY,
+# which is a placeholder string, never a real key):
+echo 'NEWS_API_KEY="<your NewsAPI.org key>"' >> .env
+echo 'ANTHROPIC_API_KEY="<your Anthropic API key>"' >> .env
+echo 'CRON_SECRET="<any random string>"' >> .env  # optional — see lib/cronAuth.ts
 
 # 4. Migrate + seed the dev database
 npx prisma migrate dev
@@ -116,8 +123,10 @@ npm test              # vitest — migrates/seeds promptperday_test itself, no m
 npm run build          # production build sanity check
 ```
 
-No `.env.example` exists yet — worth adding in a later phase since `DATABASE_URL`
-is the only required variable right now.
+No `.env.example` exists yet — worth adding in a later phase. `DATABASE_URL` is
+the only variable required for the app itself to run; `NEWS_API_KEY` and
+`ANTHROPIC_API_KEY` are only needed to actually trigger the Phase 5 jobs, and
+`CRON_SECRET` is optional (see "Question sourcing and review" below).
 
 ## Data model
 
@@ -179,9 +188,12 @@ UI will ever actually set in v1 (see `/api/sessions/:id/submit` below).
 ## API routes
 
 Session lifecycle routes live under `app/api/sessions/`; Phase 4 added
-`app/api/categories/[id]` and `app/api/users/[id]`. There is no auth layer yet
-(see "No auth in v1" below), so every route trusts whatever `userId` / `:id` is
-passed to it.
+`app/api/categories/[id]` and `app/api/users/[id]`; Phase 5 added
+`app/api/questions/[id]` and the job-trigger routes under `app/api/jobs/`
+(documented in "Question sourcing and review" below, not repeated here).
+There is no auth layer on any of these (see "No auth in v1" below) except the
+optional `CRON_SECRET` check on the two job-trigger routes — every other
+route trusts whatever `userId` / `:id` is passed to it.
 
 ### POST `/api/sessions/start`
 
@@ -504,11 +516,123 @@ prompt per day." (the Phase 1 placeholder used "AI kills," without "can" — upd
 to match the exact wording once it was explicitly provided). Same copy is also
 the page `<meta description>` in `app/layout.tsx`.
 
+## Question sourcing and review (Phase 5)
+
+Two background jobs generate candidate `Question` rows at `status =
+PENDING_REVIEW`, and one internal page lets you approve or reject them. This
+is the piece that fills the seeded 30-question pool back up over time.
+
+### News-derived current-events questions — [`lib/jobs/newsQuestions.ts`](lib/jobs/newsQuestions.ts)
+
+Pulls headlines from [NewsAPI.org](https://newsapi.org)'s `/v2/top-headlines`
+endpoint (the "[news API]" referenced in the spec — any provider would fit
+behind this same function shape; NewsAPI was picked as a concrete, common
+choice). `fetchHeadlines` takes an injectable `fetch` implementation
+specifically so tests can mock it — the Phase 5 instruction was explicit that
+external APIs must never be hit in the test suite.
+
+Two independent filters, both required per the spec:
+
+- **Source allowlist** ([`lib/newsSources.ts`](lib/newsSources.ts)) — Reuters,
+  AP, BBC. Applied twice: once via the `sources` query param (so NewsAPI
+  itself narrows the results) and again in code against
+  `article.source.id` (defense in depth — doesn't trust the API to fully
+  honor the query param, and gives the filter a home in code the tests can
+  actually exercise).
+- **Keyword denylist** ([`lib/newsSources.ts`](lib/newsSources.ts)) — a
+  case-insensitive substring check against the raw headline for
+  outrage-bait phrasing and explicit partisan-flashpoint terms. This is the
+  automated backstop for "no hyper-partisan bait" now that there's no human
+  approval gate before generation — see the note in `lib/newsSources.ts` and
+  the "No pre-publish moderation" item below.
+
+A passing headline is **not** inserted verbatim as the question text — it's
+run through [`lib/currentEventsTemplates.ts`](lib/currentEventsTemplates.ts),
+one of eight templates (chosen at random) that turns the headline into a
+reflective writing prompt in the same style as the seeded questions ("Write a
+letter to someone reading about this ten years from now...", "Argue the
+strongest good-faith case for...", etc.) rather than a bare news blurb.
+Inserted with `sourceType: NEWS_DERIVED`, `status: PENDING_REVIEW`, into the
+`current events` category.
+
+### AI-generated philosophy / personal-life questions — [`lib/jobs/aiQuestions.ts`](lib/jobs/aiQuestions.ts)
+
+Calls the Anthropic Messages API (`@anthropic-ai/sdk`, model
+`claude-opus-5`) with `client.messages.parse()` and a Zod schema
+(`{ questions: string[] }` × 10, via `zodOutputFormat` from
+`@anthropic-ai/sdk/helpers/zod`) so the response is structurally guaranteed
+parseable rather than hoping the model returns valid JSON. The generation
+prompt ([`lib/aiQuestionPrompts.ts`](lib/aiQuestionPrompts.ts)) restates the
+same style guide from the original SETTINGS spec verbatim — narrative
+unfolding, reasoning through consequences, emotional unpacking; a mix of
+hypotheticals, advice-column simulation, argue-the-other-side, letters never
+sent, sensory reconstruction, ethical dilemmas, legacy/values prompts — so
+AI-generated questions match the seeded ones in shape.
+
+The `client` parameter is injectable (`Pick<Anthropic, "messages">`,
+defaulting to a real client from
+[`lib/anthropicClient.ts`](lib/anthropicClient.ts)) for the same
+mock-in-tests reason as the news job. Inserted with `sourceType:
+AI_GENERATED`, `status: PENDING_REVIEW`, into whichever of `philosophy` /
+`personal life` was requested.
+
+**No pre-publish moderation step** — per earlier direction, generated
+questions go straight to `PENDING_REVIEW` and become usable the moment
+they're approved; there's no queue-before-the-queue. This does mean the
+keyword denylist above is the *only* automated safeguard on the news path,
+and the AI path has no automated safeguard at all beyond whatever Claude's
+own judgment applies to the generation prompt — both rely entirely on you
+using the review page before approving.
+
+### Triggering the jobs
+
+Both are POST routes, not routes with UI of their own:
+
+- `POST /api/jobs/news-questions` — no body.
+- `POST /api/jobs/ai-questions` — body `{ category?: "philosophy" | "personal life" }`; omit to run both in one call.
+
+Both are gated by [`lib/cronAuth.ts`](lib/cronAuth.ts): if `CRON_SECRET` is
+set, requests need `Authorization: Bearer <secret>`; if unset, they're open —
+matching this project's existing no-auth-yet posture (see "No auth in v1")
+rather than introducing a second, inconsistent security model. **These
+routes are meant to be invoked by an external scheduler** — a system cron
+entry running `curl -X POST .../api/jobs/news-questions`, or a
+`vercel.json` Cron Jobs entry once this is actually deployed to Vercel —
+not by an in-process scheduler. Next.js/Vercel's request-driven model
+doesn't have a natural place for an always-on `setInterval`-style
+scheduler to live, and building a fake one for local dev would be
+misleading about how this actually runs in production. No scheduler is
+wired up yet; this is the trigger surface a real one would call.
+
+### PATCH `/api/questions/:id` — approve/reject
+
+Body: `{ status: "approved" | "archived" }`. 404 if the question doesn't
+exist, 400 on any other status value. This is the only mutation the review
+page needs — "reject" maps to `ARCHIVED` (the third status the schema
+already had, previously unused) rather than a delete, so a rejected
+question's text isn't lost.
+
+### Internal review page — [`app/admin/questions/page.tsx`](app/admin/questions/page.tsx)
+
+Server Component fetching every `PENDING_REVIEW` question (all three
+categories) via Prisma directly, grouped by category in the client component
+[`components/admin/QuestionReview.tsx`](components/admin/QuestionReview.tsx).
+Approve/Reject call the PATCH route above and remove the card from the local
+list on success (no full reload). **Not linked in `NavTabs`** — reachable
+only at `/admin/questions` by direct URL, which is what "not public-facing"
+means in practice given there's no auth system to actually gate it behind
+(see "No auth in v1"). This is a narrower, earlier piece of the full
+"admin review dashboard" noted as a Known Simplification since Phase 3 —
+that dashboard is still a later phase; this page only does question
+moderation.
+
 ## Nav shell
 
 [`components/NavTabs.tsx`](components/NavTabs.tsx) renders the four tabs as plain
 links (`usePathname` for the active-tab style) in `app/layout.tsx`. As of Phase 4
-all four routes are real: `/` (BEGIN), `/history`, `/settings`, `/why`.
+all four routes are real: `/` (BEGIN), `/history`, `/settings`, `/why`. The
+Phase 5 review page at `/admin/questions` is deliberately **not** one of these
+four — see above.
 
 ## Testing
 
@@ -516,27 +640,61 @@ all four routes are real: `/` (BEGIN), `/history`, `/settings`, `/why`.
 (`promptperday_test`), not a mocked Prisma client. `vitest.config.mts`'s
 `globalSetup` (`tests/globalSetup.ts`) runs `prisma migrate deploy` then
 `prisma db seed` against that database once before the whole suite, so `npm test`
-works from a clean checkout with no manual setup step. `tests/helpers.ts` exposes
-`resetDb()` (clears `User`/`Session`/`Entry`/`UserQuestionHistory` between tests,
-keeps the seeded `Category`/`Question` rows) and `createRawSession()` (inserts a
-`Session` directly via Prisma, bypassing `/start`, so tests can fabricate specific
-timer states — e.g. "write phase already ended 90 seconds ago" — without waiting
-on real time).
+works from a clean checkout with no manual setup step.
+
+`tests/helpers.ts`'s `resetDb()` is the canonical per-test cleanup, called in
+every test file's `beforeEach`. As of Phase 5 it does more than clear session
+data: it also deletes any `Question` row with `sourceType` `NEWS_DERIVED` or
+`AI_GENERATED` (test-inserted; the seed is exclusively `CURATED`) and any
+`Category` outside the three seeded ones (ad hoc categories a test created,
+e.g. for an isolated eligibility check). This grew out of a real bug caught
+while adding the Phase 5 test files: `seededCategoryAndQuestion()` (used by
+`createRawSession()`) originally picked `where: { enabledByDefault: true }`
+with no explicit ordering or name filter, so once a second test file started
+creating its own categories, it could nondeterministically resolve to a
+leftover ad hoc category from a different file instead of a real seeded one
+— it now filters explicitly by the three seeded category names.
+`vitest.config.mts` also sets `fileParallelism: false`: all test files share
+one Postgres database, so running files in parallel let one file's
+`resetDb()` delete rows a concurrently-running file's test was still using —
+a real, reproducible failure, not a hypothetical one. `createRawSession()`
+itself inserts a `Session` directly via Prisma, bypassing `/start`, so tests
+can fabricate specific timer states — e.g. "write phase already ended 90
+seconds ago" — without waiting on real time.
 
 [`tests/sessions.test.ts`](tests/sessions.test.ts) covers all five Phase 2
 Definition-of-Done cases: prep/write timestamps computed correctly at start,
 second same-day submission rejected 409, reroll succeeds once then rejects any
 further reroll of either type, grace succeeds once then rejects a second call,
-and content saves rejected past the (possibly grace-extended) deadline. Tests call
-the exported route handler functions directly (e.g. `POST` from
-`app/api/sessions/start/route.ts`) with hand-built `NextRequest` objects rather
-than booting a real Next server — faster, and still exercises real Prisma/Postgres
-underneath.
+and content saves rejected past the (possibly grace-extended) deadline.
 
-No automated tests exist yet for the Phase 3/4 UI or any of the routes added
-after Phase 2 (`/submit`, `/entry`, `/api/categories/:id`, `/api/users/:id`) —
-each phase since has been verified via a manual click-through in a real browser
-against the dev server instead:
+[`tests/jobs.test.ts`](tests/jobs.test.ts) covers the Phase 5 Definition of
+Done's first half: `runNewsQuestionsJob` with a mocked `fetch` (never a real
+network call) inserts exactly the headline that passes both the source
+allowlist and the keyword denylist, skips the rest, and lands it in
+`current events`; `runAiQuestionsJob` with a mocked Anthropic client (a stub
+`{ messages: { parse: vi.fn()... } }`, never the real SDK call) inserts all
+10 generated questions into the requested category (`philosophy` and
+`personal life` both covered) with `sourceType: AI_GENERATED`.
+
+[`tests/questionReview.test.ts`](tests/questionReview.test.ts) covers the
+second half: approving a `PENDING_REVIEW` question flips it to `APPROVED`
+*and* — using an isolated single-question test category so the result is
+deterministic rather than probabilistic — confirms `pickQuestion` (the same
+selection function `/start` uses) can now return it, where it couldn't
+before the approval; rejecting flips it to `ARCHIVED` and confirms it stays
+unselectable.
+
+All test files call the exported route handler functions directly (e.g.
+`POST` from `app/api/sessions/start/route.ts`) with hand-built `NextRequest`
+objects rather than booting a real Next server — faster, and still exercises
+real Prisma/Postgres underneath.
+
+No automated tests exist yet for the Phase 3/4 UI or the routes added in
+those phases (`/submit`, `/entry`, `/api/categories/:id`, `/api/users/:id`)
+or the Phase 5 UI (`/admin/questions`, the job-trigger routes) — those have
+each been verified via a manual click-through in a real browser against the
+dev server instead:
 
 - **Phase 3**: start → reroll → write with toolbar/autosave/grace/focus-warning →
   auto-transition to submission on expiry → submit → confirmed `Entry` row
@@ -552,9 +710,16 @@ against the dev server instead:
   "completed" cell, correct legend count), that clicking it opens the entry with
   formatting intact, that copy-to-clipboard succeeds, and that month navigation
   doesn't falsely mark pre-history days as "missed."
+- **Phase 5**: inserted fixture `PENDING_REVIEW` rows directly (standing in
+  for real job output, since no real `NEWS_API_KEY`/`ANTHROPIC_API_KEY` is
+  configured in this environment), visited `/admin/questions`, approved one
+  and confirmed the card disappeared and `psql` showed `status = approved`,
+  rejected the other and confirmed `status = archived` — the "becomes
+  eligible" half of the Definition of Done is proven deterministically by
+  the automated test above rather than by a probabilistic live `/start` call.
 
-Worth adding real component/route tests for all of this in a later phase —
-current coverage is Phase 2's five endpoints only.
+Worth adding real component/route tests for the Phase 3/4 UI in a later
+phase — Phase 2 and Phase 5's backend logic now both have direct coverage.
 
 ## Known simplifications / not yet built
 
@@ -584,7 +749,22 @@ current coverage is Phase 2's five endpoints only.
   post-expiry submission screen, so no early-submit button exists yet. The
   `/submit` endpoint itself has no deadline gate, so adding the button later is a
   UI-only change.
-- **No moderation/curation pipeline** — per earlier direction, AI/API-sourced
-  questions go straight to `status = APPROVED` when that generator is built; the
-  `PENDING_REVIEW`/`ARCHIVED` statuses exist on `Question` for the admin review
-  dashboard (planned for after all phases) to use, not as a pre-publish gate.
+- **Review page has no auth** — `/admin/questions` is "not public-facing" only
+  in the sense of not being linked from `NavTabs`; anyone with the URL and
+  network access to the app can open and use it. Same posture as the rest of
+  the app (see "No auth in v1"), but worth calling out separately since this
+  page can publish content, not just view it.
+- **No scheduler wired up** — `POST /api/jobs/news-questions` and
+  `POST /api/jobs/ai-questions` exist as trigger endpoints (optionally gated
+  by `CRON_SECRET`) but nothing calls them on a schedule yet. Needs an
+  external cron (system crontab + `curl`, or a `vercel.json` Cron Jobs entry
+  once this is deployed to Vercel) pointed at them.
+- **AI-generated questions have no automated content safeguard** — the news
+  path has the keyword denylist; the philosophy/personal-life generation
+  path relies entirely on the generation prompt plus your own judgment on
+  the review page. There's no automated check on AI-generated text before
+  it reaches `PENDING_REVIEW`.
+- **The full admin dashboard is still ahead** — `/admin/questions` only does
+  question moderation. The broader "review dashboard... for moderating
+  questions and general review of systems" described early on is still a
+  later phase; this is a narrower slice of it.

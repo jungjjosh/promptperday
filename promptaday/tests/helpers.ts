@@ -1,13 +1,35 @@
 import { prisma } from "@/lib/prisma";
-import { SessionStatus } from "@prisma/client";
+import { SessionStatus, SourceType } from "@prisma/client";
 
 export { prisma };
 
+const SEED_CATEGORY_NAMES = ["current events", "philosophy", "personal life"];
+
+// The canonical per-test cleanup. All test files share one real Postgres
+// database (no per-file isolation), so this has to undo everything a test
+// might create beyond the base seed: sessions/entries/history/users, any
+// Question rows inserted by the news/AI generation jobs (seed data is
+// exclusively sourceType CURATED, so filtering the other two source types
+// cleanly isolates test-inserted rows), and any ad hoc Category a test
+// created (e.g. an isolated single-question category for eligibility
+// tests) — left in place, these confuse other tests that pick "any
+// enabledByDefault category" with no explicit ordering.
 export async function resetDb() {
   await prisma.userQuestionHistory.deleteMany();
   await prisma.entry.deleteMany();
   await prisma.session.deleteMany();
   await prisma.user.deleteMany();
+  await prisma.question.deleteMany({
+    where: {
+      OR: [
+        { sourceType: { in: [SourceType.NEWS_DERIVED, SourceType.AI_GENERATED] } },
+        { category: { name: { notIn: SEED_CATEGORY_NAMES } } },
+      ],
+    },
+  });
+  await prisma.category.deleteMany({
+    where: { name: { notIn: SEED_CATEGORY_NAMES } },
+  });
 }
 
 let userCounter = 0;
@@ -30,8 +52,11 @@ export async function createTestUser(
 }
 
 export async function seededCategoryAndQuestion() {
+  // Explicit name filter (not just enabledByDefault) so this can never
+  // resolve to an ad hoc category a different test file left behind.
   const category = await prisma.category.findFirstOrThrow({
-    where: { enabledByDefault: true },
+    where: { enabledByDefault: true, name: { in: SEED_CATEGORY_NAMES } },
+    orderBy: { name: "asc" },
   });
   const question = await prisma.question.findFirstOrThrow({
     where: { categoryId: category.id },

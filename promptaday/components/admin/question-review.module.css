@@ -1,0 +1,79 @@
+.screen {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.categoryGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.categoryTitle {
+  font-size: 1rem;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.card {
+  border: 1px solid #e2ddd1;
+  border-radius: 8px;
+  padding: 0.9rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.cardMeta {
+  font-size: 0.75rem;
+  opacity: 0.6;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.cardText {
+  font-size: 0.95rem;
+  line-height: 1.4;
+}
+
+.actions {
+  display: flex;
+  gap: 0.6rem;
+}
+
+.button {
+  padding: 0.4rem 0.9rem;
+  border-radius: 8px;
+  border: 1px solid #d8d3c8;
+  background: #fff;
+  color: #1a1a1a;
+  color-scheme: light;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.approveButton {
+  background: #2f7d46;
+  border-color: #2f7d46;
+  color: #fff;
+}
+
+.rejectButton {
+  background: #fff;
+  color: #b3261e;
+  border-color: #e3b3ad;
+}
+
+.emptyState {
+  opacity: 0.6;
+  font-size: 0.9rem;
+}
