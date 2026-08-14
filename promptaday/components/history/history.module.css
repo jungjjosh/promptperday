@@ -1,0 +1,199 @@
+.screen {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.monthHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.monthLabel {
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.navButton {
+  padding: 0.4rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid #d8d3c8;
+  background: #fff;
+  color: #1a1a1a;
+  color-scheme: light;
+  cursor: pointer;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 0.35rem;
+}
+
+.weekdayLabel {
+  text-align: center;
+  font-size: 0.75rem;
+  opacity: 0.6;
+  padding-bottom: 0.25rem;
+}
+
+.dayCell {
+  aspect-ratio: 1;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.15rem;
+  font-size: 0.75rem;
+}
+
+.dayEmpty {
+  visibility: hidden;
+}
+
+.dayPlain {
+  opacity: 0.4;
+}
+
+.dayToday {
+  border-color: #1a1a1a;
+}
+
+.dayMissed {
+  background: #ece8e0;
+  opacity: 0.7;
+}
+
+.dayCompleted {
+  background: #dcefdf;
+  border-color: #2f7d46;
+  cursor: pointer;
+}
+
+.dayCompleted:hover {
+  filter: brightness(0.97);
+}
+
+.dayNumber {
+  font-variant-numeric: tabular-nums;
+}
+
+.dayEmoji {
+  font-size: 1rem;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid #e2ddd1;
+}
+
+.legendItem {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+}
+
+.legendCount {
+  opacity: 0.6;
+}
+
+.emptyState {
+  opacity: 0.6;
+  font-size: 0.9rem;
+}
+
+/* Entry modal */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  z-index: 10;
+}
+
+.modal {
+  background: #fff;
+  color: #1a1a1a;
+  color-scheme: light;
+  border-radius: 12px;
+  padding: 1.5rem;
+  max-width: 560px;
+  width: 100%;
+  max-height: 80vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.modalHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.modalMeta {
+  font-size: 0.8rem;
+  opacity: 0.6;
+}
+
+.modalTitle {
+  font-size: 1.3rem;
+  font-weight: 600;
+}
+
+.modalDescription {
+  font-size: 0.9rem;
+  opacity: 0.8;
+}
+
+.modalContent {
+  line-height: 1.6;
+  border-top: 1px solid #e2ddd1;
+  border-bottom: 1px solid #e2ddd1;
+  padding: 0.9rem 0;
+}
+
+.modalSources {
+  font-size: 0.85rem;
+  opacity: 0.75;
+}
+
+.modalActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+}
+
+.button {
+  padding: 0.5rem 0.9rem;
+  border-radius: 8px;
+  border: 1px solid #d8d3c8;
+  background: #fff;
+  color: #1a1a1a;
+  color-scheme: light;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.closeButton {
+  border: none;
+  background: none;
+  font-size: 1.1rem;
+  cursor: pointer;
+  opacity: 0.6;
+}

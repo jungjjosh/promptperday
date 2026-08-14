@@ -1,6 +1,6 @@
 # promptperday — Project Reference
 
-This document describes everything built so far (Phases 1–3) in enough detail that a
+This document describes everything built so far (Phases 1–4) in enough detail that a
 skilled developer could recreate the project from scratch without guessing at a
 decision. It covers the stack, the exact data model and why each field exists, every
 API route's contract, the BEGIN tab's UI architecture, and every deliberate
@@ -14,12 +14,14 @@ promptperday is a single-user, web-first daily writing app. Each day the user ge
 exactly one writing prompt (a random category + question), goes through a timed
 prep phase and a timed write phase, then submits what they wrote.
 
-**Four tabs:** BEGIN, HISTORY, SETTINGS, WHY? — only BEGIN has real functionality as
-of Phase 3; the other three are placeholder pages (see "Not yet built" below).
+**Four tabs:** BEGIN, HISTORY, SETTINGS, WHY? — all four are functional as of
+Phase 4.
 
-**Categories (seeded):** current events, philosophy, personal life — all toggleable
-per user (the toggle UI doesn't exist yet; the schema supports it via
-`Category.enabledByDefault`).
+**Categories (seeded):** current events, philosophy, personal life — toggleable via
+SETTINGS. Note the toggle is currently **global** (`Category.enabledByDefault`),
+not per-user — see "No auth in v1" / "Known simplifications" below; for a
+single-user app this is functionally identical to a per-user toggle, but it would
+need a join table (e.g. `UserCategoryPreference`) before a second real user exists.
 
 **Explicitly out of scope for v1** (per the original spec): image upload, Google
 Docs export, social feed, and any functional Friends/Public visibility (the UI shows
@@ -176,8 +178,9 @@ UI will ever actually set in v1 (see `/api/sessions/:id/submit` below).
 
 ## API routes
 
-All routes live under `app/api/sessions/`. There is no auth layer yet (see
-"No auth in v1" below), so every route trusts whatever `userId` / session `:id` is
+Session lifecycle routes live under `app/api/sessions/`; Phase 4 added
+`app/api/categories/[id]` and `app/api/users/[id]`. There is no auth layer yet
+(see "No auth in v1" below), so every route trusts whatever `userId` / `:id` is
 passed to it.
 
 ### POST `/api/sessions/start`
@@ -282,6 +285,40 @@ sources or flip `Session.status` to `SUBMITTED` — and `PATCH /content` explici
 appears. Raised this conflict directly rather than silently picking a side; the
 user chose adding two small, single-purpose endpoints over overloading
 `PATCH /content` with a status flag and a loosened deadline check.
+
+### PATCH `/api/categories/:id` — added in Phase 4
+
+Body: `{ enabledByDefault: boolean }`
+
+- 404 if the category doesn't exist.
+- 400 if `enabledByDefault` isn't a boolean.
+- 400 (`"At least one category must stay enabled"`) if this would disable the
+  last remaining enabled category — without this guard, `/start`'s `pickCategory`
+  would have nothing to pick from and 500. SETTINGS also disables this
+  client-side (can't toggle off the last active switch), but the server check is
+  the real guard since the API doesn't otherwise trust the client.
+- 200, body: `{ id, name, enabledByDefault }`.
+
+### PATCH `/api/users/:id` — added in Phase 4
+
+Body: `{ prepDurationMinutes: number }`
+
+- 404 if the user doesn't exist.
+- 400 if `prepDurationMinutes` isn't one of `5, 10, 15, 20`.
+- 200, body: `{ id, prepDurationMinutes }`.
+- This is what SETTINGS' prep-duration dropdown calls. `/start` already read
+  `User.prepDurationMinutes` since Phase 2 — this route is the only piece that
+  was missing to make the setting actually changeable.
+
+### `/start` and `/reroll` hardening — added in Phase 4
+
+Both routes now catch `NoCategoriesAvailableError` / `NoQuestionsAvailableError`
+(thrown by `lib/questionPool.ts`) and return a clean `400` instead of an
+unhandled `500`. Before Phase 4 this was an unreachable theoretical edge case;
+once SETTINGS could actually disable every category, it became a real path a
+user could hit (a race between two browser tabs, for instance, since the
+last-enabled-category guard on `PATCH /api/categories/:id` isn't transactional
+against a concurrent `/start` call) — cheap to guard against, so it's guarded.
 
 ## No auth in v1
 
@@ -397,13 +434,81 @@ form controls sitting on an explicitly-white background — producing invisible
 white-on-white button/input text. Setting `color-scheme: light` on those specific
 light-surfaced elements fixes it without making the whole app light-mode-only.
 
-## Nav shell and stub tabs
+## SETTINGS tab UI architecture
+
+[`app/settings/page.tsx`](app/settings/page.tsx) — Server Component, same pattern
+as BEGIN: resolves the default user and fetches all categories directly via
+Prisma (no GET endpoint needed), passes both down to
+[`components/settings/SettingsForm.tsx`](components/settings/SettingsForm.tsx), a
+client component.
+
+`SettingsForm` renders each category as a toggle switch and the prep duration as
+a `<select>` (5/10/15/20 min — write time is displayed as fixed, not editable).
+Both controls update optimistically (flip local state immediately) then call
+their PATCH endpoint; on a non-OK response, the change is rolled back and the
+server's error message is shown. The "last enabled category" guard is checked
+client-side too (before the request fires) so the user gets instant feedback,
+but the source of truth is the server-side check in
+`PATCH /api/categories/:id` — see the API section above.
+
+## HISTORY tab UI architecture
+
+[`app/history/page.tsx`](app/history/page.tsx) — Server Component. Fetches every
+`SUBMITTED` session for the default user (joined with its `Category` and
+`Entry`) via [`lib/historyData.ts`](lib/historyData.ts)'s `getHistoryEntries`,
+plus the full category list (for the legend, so categories with zero entries
+still show up), and passes both to
+[`components/history/HistoryView.tsx`](components/history/HistoryView.tsx).
+
+**Emoji vs. color — these encode different things**, per an earlier, explicit
+clarification: *emoji marks category, color marks completion* — not "color per
+category." [`lib/categoryStyle.ts`](lib/categoryStyle.ts) is a small fixed
+`name → emoji` lookup (📰 current events, 🧠 philosophy, 💭 personal life; there's
+no emoji/color column on `Category`, so this isn't stored state). Every day
+*with* a submitted entry gets the same green "completed" styling regardless of
+which category it was, with that day's category emoji on top of it. Days
+*without* an entry get one of three neutral treatments: a bordered "today"
+indicator, a muted gray "missed" treatment (only applied between the user's
+earliest entry and yesterday — a day before any history exists isn't a "miss"),
+or plain/dim for anything else (future dates, or days before the first entry).
+
+**Calendar**: a plain month grid built from `Date` geometry (`getDay()` for the
+first weekday offset, `new Date(y, m+1, 0).getDate()` for days-in-month) —
+`Sun`–`Sat` columns, prev/next month navigation via local `{year, month}` state.
+Because all of the user's entries are fetched up front (small dataset at this
+project's scale), navigating months is instant with no extra network calls. Day
+cells are matched against entries by a `YYYY-MM-DD` string key
+(`localDateKey`, same helper `/start` uses for its day-boundary check) rather
+than comparing `Date` objects, avoiding a second timezone-conversion path.
+
+**Clicking a completed day** opens
+[`components/history/EntryModal.tsx`](components/history/EntryModal.tsx): a
+read-only TipTap instance (`editable: false`, same extension set as
+`WriteScreen` — `StarterKit`, `TextStyle`, `Color`, `FontFamily`, `FontSize` — so
+saved formatting renders correctly) plus title/description/sources/date, and a
+**copy-to-clipboard** button (`navigator.clipboard.writeText(editor.getText())`
+— plain text, not HTML/rich-text clipboard formats, since the most likely
+destination is a plain text field or another editor that wouldn't preserve
+TipTap-specific marks anyway).
+
+**Legend**: horizontal row below the calendar, one chip per category (emoji +
+name + count), counting **all-time** submitted entries for that category, not
+just the currently-viewed month — read as an overall distribution snapshot
+rather than a per-month stat, so it doesn't change as you navigate months.
+
+## WHY tab
+
+[`app/why/page.tsx`](app/why/page.tsx) — fully static, no data fetching. Copy is
+the exact text provided in Phase 4: "AI can kill expression. Save yours with a
+prompt per day." (the Phase 1 placeholder used "AI kills," without "can" — updated
+to match the exact wording once it was explicitly provided). Same copy is also
+the page `<meta description>` in `app/layout.tsx`.
+
+## Nav shell
 
 [`components/NavTabs.tsx`](components/NavTabs.tsx) renders the four tabs as plain
-links (`usePathname` for the active-tab style) in `app/layout.tsx`. `/history`,
-`/settings`, `/why` are placeholder Server Components ("Coming in a later phase")
-so the app reads as four tabs now rather than BEGIN being an orphan page; none of
-their real functionality is built yet.
+links (`usePathname` for the active-tab style) in `app/layout.tsx`. As of Phase 4
+all four routes are real: `/` (BEGIN), `/history`, `/settings`, `/why`.
 
 ## Testing
 
@@ -428,25 +533,46 @@ the exported route handler functions directly (e.g. `POST` from
 than booting a real Next server — faster, and still exercises real Prisma/Postgres
 underneath.
 
-No automated tests exist yet for the Phase 3 UI or the `/submit`/`/entry` routes —
-Phase 3 was verified via a manual click-through in a real browser against the dev
-server (start → reroll → write with toolbar/autosave/grace/focus-warning →
-auto-transition to submission on expiry → submit → confirmed `Entry` row content
-in Postgres → reload confirmed the congrats state → separately verified delete
-returns to the idle state and removes the `Entry` row). Worth adding component/
-route tests for these in a later phase.
+No automated tests exist yet for the Phase 3/4 UI or any of the routes added
+after Phase 2 (`/submit`, `/entry`, `/api/categories/:id`, `/api/users/:id`) —
+each phase since has been verified via a manual click-through in a real browser
+against the dev server instead:
+
+- **Phase 3**: start → reroll → write with toolbar/autosave/grace/focus-warning →
+  auto-transition to submission on expiry → submit → confirmed `Entry` row
+  content in Postgres → reload confirmed the congrats state → separately
+  verified delete returns to the idle state and removes the `Entry` row.
+- **Phase 4**: toggled categories off in SETTINGS, confirmed via `psql` the
+  change persisted, then called `/start` five times in a row and confirmed it
+  only ever returned the one still-enabled category; confirmed the
+  last-enabled-category guard rejects turning the final one off; changed prep
+  duration to 20 in SETTINGS and confirmed the next `/start` response's
+  `prepEndsAt` was ~20 minutes out and `writeEndsAt` exactly 5 minutes after
+  that; confirmed HISTORY renders the real Phase 3 entry (correct emoji, green
+  "completed" cell, correct legend count), that clicking it opens the entry with
+  formatting intact, that copy-to-clipboard succeeds, and that month navigation
+  doesn't falsely mark pre-history days as "missed."
+
+Worth adding real component/route tests for all of this in a later phase —
+current coverage is Phase 2's five endpoints only.
 
 ## Known simplifications / not yet built
 
 - **No auth** — single hardcoded default user (see above). Required before
   multi-user or public deployment.
 - **No streak counter** — rules are confirmed (see "Streak semantics") but no
-  field or logic exists yet.
-- **HISTORY, SETTINGS, WHY? tabs** are placeholder pages only.
-- **No category-preference UI** — `Category.enabledByDefault` exists and
-  `/start` respects it, but there's no way to toggle it per user yet (would need
-  a `UserCategoryPreference` join table or similar — `enabledByDefault` is
-  currently global, not per-user).
+  field or logic exists yet. HISTORY doesn't show a streak number, only the
+  calendar.
+- **Category preferences are global, not per-user** — `Category.enabledByDefault`
+  is a single column on `Category`, toggled directly by SETTINGS. Fine for a
+  single-user app (see "No auth in v1"); would need a `UserCategoryPreference`
+  join table before a second real user exists, since today one user's toggle
+  affects everyone.
+- **HISTORY has no pagination or year view** — every submitted session is loaded
+  on every page view. Fine at this project's real scale (at most one row per
+  day, ever), but would need a bounded query (e.g. by visible month, fetched via
+  a small API route instead of loading everything up front) if usage patterns
+  change.
 - **No content restore on reload during the write phase** — if the page is
   reloaded mid-write, the TipTap editor remounts empty; autosaved content is
   safely in the `Entry` row in Postgres, but `ActiveSessionData` doesn't currently

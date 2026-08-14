@@ -1,7 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SessionStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { pickCategory, pickQuestion } from "@/lib/questionPool";
+import {
+  NoCategoriesAvailableError,
+  NoQuestionsAvailableError,
+  pickCategory,
+  pickQuestion,
+} from "@/lib/questionPool";
 
 export async function POST(
   request: NextRequest,
@@ -36,20 +41,27 @@ export async function POST(
   let category = { id: session.categoryId, name: "" };
   let question;
 
-  if (type === "category") {
-    const newCategory = await pickCategory(prisma, session.categoryId);
-    question = await pickQuestion(prisma, session.userId, newCategory.id);
-    category = newCategory;
-  } else {
-    question = await pickQuestion(
-      prisma,
-      session.userId,
-      session.categoryId,
-      session.questionId,
-    );
-    category = await prisma.category.findUniqueOrThrow({
-      where: { id: session.categoryId },
-    });
+  try {
+    if (type === "category") {
+      const newCategory = await pickCategory(prisma, session.categoryId);
+      question = await pickQuestion(prisma, session.userId, newCategory.id);
+      category = newCategory;
+    } else {
+      question = await pickQuestion(
+        prisma,
+        session.userId,
+        session.categoryId,
+        session.questionId,
+      );
+      category = await prisma.category.findUniqueOrThrow({
+        where: { id: session.categoryId },
+      });
+    }
+  } catch (err) {
+    if (err instanceof NoCategoriesAvailableError || err instanceof NoQuestionsAvailableError) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
+    throw err;
   }
 
   await prisma.$transaction(async (tx) => {

@@ -7,7 +7,7 @@ const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: "promptperday",
-  description: "AI kills expression. Save yours with a prompt per day.",
+  description: "AI can kill expression. Save yours with a prompt per day.",
 };
 
 export default function RootLayout({
