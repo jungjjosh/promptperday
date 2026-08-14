@@ -1,7 +1,7 @@
 # promptperday — Project Reference
 
 This is the standing source of truth for this project. It describes everything
-built so far (Phases 1–6) in enough detail that a skilled developer could
+built so far (Phases 1–7) in enough detail that a skilled developer could
 recreate the project from scratch without guessing at a decision: the stack,
 the exact data model and why each field exists, every API route's contract,
 the BEGIN tab's UI architecture, and every deliberate simplification or
@@ -43,7 +43,7 @@ Phase 4.
 
 **Categories (seeded):** current events, philosophy, personal life —
 toggleable via SETTINGS. Note the toggle is currently **global**
-(`Category.enabledByDefault`), not per-user — see "No auth in v1" / "Known
+(`Category.enabledByDefault`), not per-user — see "Auth" / "Known
 simplifications" below; for a single-user app this is functionally identical
 to a per-user toggle, but it would need a join table (e.g.
 `UserCategoryPreference`) before a second real user exists.
@@ -144,6 +144,9 @@ case described above.
 | Tests | Vitest | 4.1.10 | Runs against a real second Postgres database, not mocks — see "Testing" below. |
 | Lint | ESLint | 8.57.1 (`eslint-config-next@14`) | Pinned to v8 because `eslint-config-next@14` doesn't support ESLint 9's flat config; `create-next-app` scaffolds ESLint 9 by default. |
 | LLM | `@anthropic-ai/sdk` | 0.117.1, model `claude-opus-5` | Phase 5's AI-generated-question job. Structured output via `client.messages.parse()` + `zodOutputFormat` (needs `zod` ^4, installed alongside). |
+| Auth | `jose` | 6.2.8 | Phase 7's session cookie (see "Auth" below). Chosen over `next-auth`/Auth.js because there's only one real user — no accounts, providers, or per-user sessions to justify a full auth library; `jose` is a minimal, Edge-Runtime-compatible JWT sign/verify primitive that works identically in `middleware.ts` (Edge) and the login route (Node). |
+| Error tracking | `@sentry/nextjs` | 10.70.0 | Phase 7. Classic per-runtime config files (`sentry.{client,server,edge}.config.ts`), not the newer `instrumentation.ts`/`instrumentation-client.ts` convention — see "Deployment" below for why. |
+| Analytics | `posthog-js` | 1.417.1 | Phase 7, client-side only. Basic autocapture + manually-captured pageviews (App Router navigations aren't full page loads, so PostHog's own pageview autocapture never fires) — see "Deployment" below. |
 
 ### Why Prisma 6, not 7
 
@@ -182,27 +185,38 @@ createdb promptperday_test  # test database (Vitest's globalSetup migrates/seeds
 # 3. Environment files (gitignored — not committed)
 echo 'DATABASE_URL="postgresql://<you>@localhost:5432/promptperday?schema=public"' > .env
 echo 'DATABASE_URL="postgresql://<you>@localhost:5432/promptperday_test?schema=public"' > .env.test
+# Required as of Phase 7 — the app won't start (and /login won't work)
+# without both. AUTH_SECRET signs the session cookie; APP_PASSWORD is what
+# you type into /login. See "Auth" below.
+echo "AUTH_SECRET=\"$(openssl rand -base64 32)\"" >> .env
+echo 'APP_PASSWORD="devpassword"' >> .env
+echo 'AUTH_SECRET="test-auth-secret-not-a-real-credential"' >> .env.test
+echo 'APP_PASSWORD="test-password-not-a-real-credential"' >> .env.test
 # Only needed to actually run the Phase 5 jobs (not needed for the rest of
 # the app, and the test suite mocks both — see .env.test's NEWS_API_KEY,
 # which is a placeholder string, never a real key):
 echo 'NEWS_API_KEY="<your NewsAPI.org key>"' >> .env
 echo 'ANTHROPIC_API_KEY="<your Anthropic API key>"' >> .env
-echo 'CRON_SECRET="<any random string>"' >> .env  # optional — see lib/cronAuth.ts
+echo 'CRON_SECRET="<any random string>"' >> .env  # optional locally — see lib/cronAuth.ts
+# Optional locally — Sentry/PostHog no-op cleanly when these are unset (see
+# "Deployment" below); only worth setting locally if you want local errors/
+# events to actually show up in a real Sentry/PostHog project.
+echo 'NEXT_PUBLIC_SENTRY_DSN=""' >> .env
+echo 'NEXT_PUBLIC_POSTHOG_KEY=""' >> .env
 
 # 4. Migrate + seed the dev database
 npx prisma migrate dev
 npx prisma db seed
 
 # 5. Run it
-npm run dev          # http://localhost:3000
+npm run dev          # http://localhost:3000 — redirects to /login; sign in with APP_PASSWORD
 npm test              # vitest — migrates/seeds promptperday_test itself, no manual step needed
 npm run build          # production build sanity check
 ```
 
-No `.env.example` exists yet — worth adding in a later phase. `DATABASE_URL`
-is the only variable required for the app itself to run; `NEWS_API_KEY` and
-`ANTHROPIC_API_KEY` are only needed to actually trigger the Phase 5 jobs, and
-`CRON_SECRET` is optional (see "Question sourcing and review" below).
+No `.env.example` exists yet — worth adding in a later phase. See "Deployment"
+below for the full environment variable checklist covering every phase,
+including which are required vs. optional, and where each one is used.
 
 ## Data model
 
@@ -271,9 +285,13 @@ Session lifecycle routes live under `app/api/sessions/`; Phase 4 added
 `app/api/categories/[id]` and `app/api/users/[id]`; Phase 5 added
 `app/api/questions/[id]` and the job-trigger routes under `app/api/jobs/`
 (documented in "Question sourcing and review" below, not repeated here).
-There is no auth layer on any of these (see "No auth in v1" below) except
-the optional `CRON_SECRET` check on the two job-trigger routes — every other
-route trusts whatever `userId` / `:id` is passed to it.
+As of Phase 7, every route below sits behind the session-cookie check in
+[`middleware.ts`](middleware.ts) (see "Auth" below) except the two
+job-trigger routes, which use their own `CRON_SECRET` check instead — an
+external scheduler has no session to send. Within a route, there's still no
+per-request ownership check: every route trusts whatever `userId` / `:id`
+is passed to it, which is fine given there's still exactly one real user
+account behind the login (see "Auth").
 
 ### POST `/api/sessions/start`
 
@@ -422,16 +440,64 @@ browser tabs, for instance, since the last-enabled-category guard on `PATCH
 /api/categories/:id` isn't transactional against a concurrent `/start`
 call) — cheap to guard against, so it's guarded.
 
-## No auth in v1
+## Auth
 
-Nothing in the original spec described a login flow — this is a
-single-user, personal, local-only app for now. `lib/currentUser.ts` resolves
-to a lazily created, single `User` row (`you@promptperday.local`, timezone
-taken from `Intl.DateTimeFormat().resolvedOptions().timeZone` at creation
-time). Every API route trusts the `userId` / session `:id` it's given with
-no ownership check. This is fine for local single-user use and must be
-replaced before this serves more than one person or is deployed anywhere
-reachable by others.
+**Through Phase 6, there was no login at all** — this is still a
+single-user, personal app, and that part hasn't changed: `lib/currentUser.ts`
+still resolves to one lazily created `User` row
+(`you@promptperday.local`, timezone taken from
+`Intl.DateTimeFormat().resolvedOptions().timeZone` at creation time), and
+every API route still trusts whatever `userId` / session `:id` it's given
+with no per-request ownership check — there's still only one real user, so
+there's nothing to check ownership *against*.
+
+**Phase 7 added a real login gate in front of that single user** — not a
+multi-user account system, but a single shared app password that must be
+entered before any page or API route (other than `/api/jobs/*`, see below)
+will respond. This exists specifically so a deployed, publicly-reachable URL
+isn't wide open to anyone who finds it, which mattered once "deployed
+somewhere reachable by others" stopped being hypothetical.
+
+**How it works:**
+
+- [`lib/auth.ts`](lib/auth.ts) signs/verifies a stateless session token
+  (`jose`'s `SignJWT`/`jwtVerify`, HS256, keyed by the `AUTH_SECRET` env
+  var) — granular `jose/jwt/sign` and `jose/jwt/verify` subpath imports, not
+  the top-level `jose` package, specifically to keep the unused JWE
+  (encryption) code — which pulls in `CompressionStream`/
+  `DecompressionStream`, unavailable in the Edge Runtime — out of the
+  bundle `middleware.ts` ships to the edge.
+- `POST /api/auth/login` ([`app/api/auth/login/route.ts`](app/api/auth/login/route.ts))
+  compares the submitted password against the `APP_PASSWORD` env var (hashed
+  both sides with SHA-256 first, then `crypto.timingSafeEqual`, so a length
+  mismatch can't throw and leak the real password's length) and, on match,
+  sets an httpOnly, `Secure`-in-production, `SameSite=Lax` session cookie
+  (30-day expiry). There's no stored password hash in the database at all —
+  a single shared app password compared live against an env var doesn't need
+  one.
+- [`middleware.ts`](middleware.ts) runs on every request except `/login`,
+  `/api/auth/*`, and `/api/jobs/*` (Next's own static asset paths are
+  excluded via the matcher). No valid session cookie → page requests
+  redirect to `/login?next=<original path>`; API requests get a `401` JSON
+  body instead of a redirect (redirecting a `fetch()` call would just hand
+  the caller an HTML login page as if it were JSON).
+- `POST /api/auth/logout` clears the cookie. The nav shell
+  ([`components/NavTabs.tsx`](components/NavTabs.tsx)) has a "Log out"
+  button, and hides the whole nav bar on `/login` itself (checked via
+  `usePathname`, since the root layout that renders `NavTabs` is a Server
+  Component with no pathname to condition on server-side).
+- `/api/jobs/*` is deliberately **exempt** from the session-cookie check —
+  an external scheduler (Vercel Cron) has no browser session to send. Those
+  routes keep their own, separate `CRON_SECRET` bearer-token check (see
+  "Question sourcing and review" below), unchanged from Phase 5.
+
+**Why a shared password instead of `next-auth`/per-user accounts:** there is
+still only one real user (see above) — building out signup, per-user
+sessions, and password-reset flows for an account system with exactly one
+account would be pure ceremony. A single shared secret gate is the smallest
+change that turns "no login" into "you must be the person who has the
+password," which is what actually matters once this is live at a public URL.
+Revisit this if the app ever needs to support more than one real person.
 
 ## BEGIN tab UI architecture
 
@@ -700,17 +766,20 @@ Both are POST routes, not routes with UI of their own:
   "personal life" }`; omit to run both in one call.
 
 Both are gated by [`lib/cronAuth.ts`](lib/cronAuth.ts): if `CRON_SECRET` is
-set, requests need `Authorization: Bearer <secret>`; if unset, they're
-open — matching this project's existing no-auth-yet posture (see "No auth
-in v1") rather than introducing a second, inconsistent security model.
-**These routes are meant to be invoked by an external scheduler** — a
-system cron entry running `curl -X POST .../api/jobs/news-questions`, or a
-`vercel.json` Cron Jobs entry once this is actually deployed to Vercel —
-not by an in-process scheduler. Next.js/Vercel's request-driven model
-doesn't have a natural place for an always-on `setInterval`-style scheduler
-to live, and building a fake one for local dev would be misleading about
-how this actually runs in production. No scheduler is wired up yet; this is
-the trigger surface a real one would call.
+set, requests need `Authorization: Bearer <secret>`; if unset, they're open.
+This is intentionally a *separate* check from Phase 7's session-cookie auth
+(see "Auth" above) rather than folding these routes into that gate — an
+external scheduler has no browser session to send, only a bearer token, and
+`middleware.ts` explicitly exempts `/api/jobs/*` for exactly that reason.
+**These routes are meant to be invoked by an external scheduler** — either
+a system cron entry running `curl -X POST .../api/jobs/news-questions`, or
+(now that this is actually deployed) the `vercel.json` Cron Jobs entries at
+the project root, which hit these same routes with a `GET` instead (see
+"Deployment" below for why `CRON_SECRET` is effectively required, not just
+optional, once deployed). Next.js/Vercel's request-driven model doesn't have
+a natural place for an always-on `setInterval`-style scheduler to live, and
+building a fake one for local dev would be misleading about how this
+actually runs in production.
 
 ### PATCH `/api/questions/:id` — approve/reject
 
@@ -727,12 +796,14 @@ categories) via Prisma directly, grouped by category in the client
 component [`components/admin/QuestionReview.tsx`](components/admin/QuestionReview.tsx).
 Approve/Reject call the PATCH route above and remove the card from the
 local list on success (no full reload). **Not linked in `NavTabs`** —
-reachable only at `/admin/questions` by direct URL, which is what "not
-public-facing" means in practice given there's no auth system to actually
-gate it behind (see "No auth in v1"). This is a narrower, earlier piece of
-the full "admin review dashboard" noted as a Known Simplification since
-Phase 3 — that dashboard is still a later phase; this page only does
-question moderation.
+reachable only at `/admin/questions` by direct URL. Before Phase 7 that URL
+obscurity was the *only* protection this page had; as of Phase 7 it also
+sits behind the same session-cookie gate as every other page (see "Auth"
+above), so being unlinked is now a secondary, defense-in-depth measure
+rather than the sole one. This is a narrower, earlier piece of the full
+"admin review dashboard" noted as a Known Simplification since Phase 3 —
+that dashboard is still a later phase; this page only does question
+moderation.
 
 ## Nav shell
 
@@ -797,6 +868,19 @@ selection function `/start` uses) can now return it, where it couldn't
 before the approval; rejecting flips it to `ARCHIVED` and confirms it
 stays unselectable.
 
+[`tests/auth.test.ts`](tests/auth.test.ts) covers Phase 7's login: calls
+`POST /api/auth/login` directly and confirms a wrong or missing password
+gets a `401` with no cookie set, and the correct password (`APP_PASSWORD`
+from `.env.test`) gets a `200` with an httpOnly session cookie whose token
+`verifySessionToken` accepts; separately confirms `lib/auth.ts`'s
+sign/verify round-trip works and rejects a tampered or garbage token.
+`middleware.ts` itself isn't exercised by these tests — like the rest of
+this suite, they call route handler functions directly rather than booting
+a real Next server, and middleware only runs in that real request pipeline
+— so the redirect-to-`/login` / `401`-on-API behavior was instead verified
+manually in a real browser (see "Phase 7" in the manual-verification list
+below).
+
 All test files call the exported route handler functions directly (e.g.
 `POST` from `app/api/sessions/start/route.ts`) with hand-built
 `NextRequest` objects rather than booting a real Next server — faster, and
@@ -832,14 +916,161 @@ real browser against the dev server instead:
   "becomes eligible" half of the Definition of Done is proven
   deterministically by the automated test above rather than by a
   probabilistic live `/start` call.
+- **Phase 7**: with the dev server running and no session cookie, confirmed
+  `/` redirects to `/login`; signed in with the wrong password and
+  confirmed an inline "Incorrect password" error with no redirect; signed
+  in with the correct `APP_PASSWORD` and confirmed a redirect to `/` with
+  the nav bar (and "Log out" button) now visible; confirmed HISTORY still
+  rendered correctly while authenticated; clicked "Log out" and confirmed
+  it redirected back to `/login`; via `curl`, confirmed `/api/debug-sentry`
+  returns `401` with no cookie and `500` (the route's intentional throw)
+  with a valid one, and checked the browser console for errors with
+  `NEXT_PUBLIC_SENTRY_DSN`/`NEXT_PUBLIC_POSTHOG_KEY` unset to confirm both
+  SDKs no-op cleanly rather than crashing the app when unconfigured.
 
 Worth adding real component/route tests for the Phase 3/4 UI in a later
-phase — Phase 2 and Phase 5's backend logic now both have direct coverage.
+phase — Phase 2, Phase 5's backend logic, and Phase 7's login route now all
+have direct coverage.
+
+## Deployment (Phase 7)
+
+**What this needs, and who does it:** everything in this section that's
+*code* (Sentry/PostHog integration, `vercel.json`, the login gate) is
+already built and committed. Everything that's an *account* — Vercel,
+a Postgres host, Sentry, PostHog — had to be created by a human with actual
+credentials; an agent can prepare the code and write the runbook below, but
+can't sign up for services or hold API tokens on your behalf. Follow the
+runbook once per service, then every future `git push` to the connected
+branch redeploys automatically via Vercel's GitHub integration.
+
+### Environment variable checklist
+
+Every variable the app reads, across all seven phases, in one place. "Local"
+values already live in `.env`/`.env.test` (gitignored) per the setup steps
+above; "Production" values get entered into the Vercel project's
+Settings → Environment Variables, not committed anywhere.
+
+| Variable | Phase | Required? | Purpose | Where to get it |
+|---|---|---|---|---|
+| `DATABASE_URL` | 1 | **Required** | Postgres connection the app queries through Prisma at runtime. | Local: your Homebrew Postgres. Production: Neon's **pooled** connection string (see note below). |
+| `DIRECT_DATABASE_URL`-equivalent | 1 | Only when migrating production | Not a schema/env var in this project (see note below) — the **direct** (unpooled) Neon connection string, used only when you personally run `prisma migrate deploy` against production. | Neon dashboard, same project as above. |
+| `AUTH_SECRET` | 7 | **Required** | Signs/verifies the session cookie (`lib/auth.ts`). Without it the app throws on every request. | Generate: `openssl rand -base64 32`. Different value in prod vs. local is fine (and preferred) — it only needs to be stable *within* one deployment. |
+| `APP_PASSWORD` | 7 | **Required** | The password `/login` checks against. | Pick one; this is what you'll actually type in to use the deployed app. |
+| `NEWS_API_KEY` | 5 | Optional | News-derived question generation job. | [NewsAPI.org](https://newsapi.org) account. |
+| `ANTHROPIC_API_KEY` | 5 | Optional | AI-generated question job. | [console.anthropic.com](https://console.anthropic.com). |
+| `CRON_SECRET` | 5 | Optional locally, **effectively required in production** | Bearer-token check on the two `/api/jobs/*` routes (`lib/cronAuth.ts`). Vercel automatically sends `Authorization: Bearer $CRON_SECRET` on its own Cron-triggered requests when this is set — set it, or the two `vercel.json` cron entries hit publicly-guessable, unauthenticated URLs. | Any random string: `openssl rand -base64 24`. |
+| `NEXT_PUBLIC_SENTRY_DSN` | 7 | Optional (no-ops if unset) | Where the client/server/edge Sentry SDKs send events. | Sentry project settings → Client Keys (DSN). |
+| `SENTRY_DSN` | 7 | Optional | Server/edge-side DSN override; falls back to `NEXT_PUBLIC_SENTRY_DSN` if unset (see `sentry.server.config.ts`/`sentry.edge.config.ts`) — in practice just set the `NEXT_PUBLIC_` one and skip this. | Same as above. |
+| `SENTRY_ORG`, `SENTRY_PROJECT`, `SENTRY_AUTH_TOKEN` | 7 | Optional, build-time only | Used by `withSentryConfig` in `next.config.mjs` to upload source maps during the Vercel build, so stack traces in Sentry show real source rather than minified bundles. Skipped silently if unset. | Sentry → Settings → Auth Tokens (needs `project:releases` scope); org/project slugs are in the URL of your Sentry project. |
+| `NEXT_PUBLIC_POSTHOG_KEY` | 7 | Optional (no-ops if unset) | PostHog project API key — enables the client-side provider in `components/analytics/PostHogProvider.tsx`. | PostHog → Project Settings → Project API Key. |
+| `NEXT_PUBLIC_POSTHOG_HOST` | 7 | Optional | PostHog ingestion host; defaults to `https://us.i.posthog.com` if unset. | PostHog project settings (differs for EU-region or self-hosted instances). |
+
+**On `DIRECT_DATABASE_URL`:** this project doesn't actually add a second
+schema.prisma `directUrl` field for it — that would force every local/test
+`.env` file to define a second Postgres URL just to satisfy Prisma's
+"env var referenced but undefined" check at `generate`/`migrate` time, for a
+distinction (pooled vs. direct) that only matters once you're on a real
+pooled host. Simpler to keep `datasource.url` as the single `DATABASE_URL`
+it's always been, and handle pooled-vs-direct purely as a *runbook*
+instruction (below): use the pooled string for the *deployed app's*
+`DATABASE_URL` in Vercel, and the direct string on your own machine
+whenever you personally run `prisma migrate deploy` against production.
+
+### Runbook
+
+1. **Push this repo to GitHub** (or GitLab/Bitbucket) — Vercel imports from
+   a Git provider, not a local folder. `git remote add origin <url> && git
+   push -u origin main`.
+2. **Create a Neon project** ([neon.tech](https://neon.tech), free tier is
+   plenty at this scale). Copy both connection strings it gives you: the
+   **pooled** one (hostname ends in `-pooler`) and the **direct** one.
+3. **Run the production migration once, from your own machine**, using the
+   *direct* connection string (Prisma Migrate's advisory locks can hang
+   over a transaction-mode pooler, which is what the `-pooler` host is):
+   ```bash
+   DATABASE_URL="<neon-direct-connection-string>" npx prisma migrate deploy
+   DATABASE_URL="<neon-direct-connection-string>" npx prisma db seed
+   ```
+4. **Create a Vercel project**, importing the GitHub repo from step 1.
+   Framework preset should auto-detect as Next.js.
+5. **Set every "Required" and any "Optional" env var you want** (see the
+   checklist above) in Vercel → Project → Settings → Environment Variables.
+   Use the **pooled** Neon connection string for `DATABASE_URL` here
+   (serverless functions open many short-lived connections; pooling is
+   what makes that not fall over).
+6. **Create a Sentry project**, platform "Next.js". Copy the DSN into
+   `NEXT_PUBLIC_SENTRY_DSN`; optionally create an auth token
+   (Settings → Auth Tokens, `project:releases` scope) for
+   `SENTRY_AUTH_TOKEN` plus `SENTRY_ORG`/`SENTRY_PROJECT` so source maps
+   upload on build.
+7. **Create a PostHog project**. Copy the project API key into
+   `NEXT_PUBLIC_POSTHOG_KEY` (and `NEXT_PUBLIC_POSTHOG_HOST` if not on
+   PostHog's default US cloud).
+8. **Deploy** — either push to the connected branch, or click Deploy in the
+   Vercel dashboard. Vercel reads `vercel.json` at the repo root and
+   registers the two cron entries automatically (visible under the
+   project's Cron Jobs tab after this first deploy).
+9. **Verify the deployed URL**: visiting it should redirect to `/login`;
+   sign in with `APP_PASSWORD`; walk BEGIN → write → submit → HISTORY and
+   confirm the new entry shows up on today's calendar cell.
+10. **Verify Sentry**: visit `<your-url>/api/debug-sentry` once (while
+    logged in) — it always throws on purpose. Check the Sentry project
+    dashboard for the event.
+11. **Verify PostHog**: click around the app for a minute, then check the
+    PostHog project's Activity/Events view for `$pageview` events.
+
+### Why Vercel Cron gets `GET` handlers, not just `POST`
+
+Vercel Cron Jobs only ever issue a `GET` request to the configured path —
+there's no way to configure a different method. The two job-trigger routes
+were `POST`-only through Phase 5 (matching "trigger this job" semantics for
+a manual `curl` call), so each route now has `export const GET = POST;`
+appended (see `app/api/jobs/news-questions/route.ts` and
+`app/api/jobs/ai-questions/route.ts`) rather than a separate handler body —
+neither route's logic actually depends on the HTTP method, and
+`ai-questions`'s body-parsing already falls back to `{}` (hence "run both
+categories") on a bodyless request, which is exactly what a `GET` is. The
+existing `CRON_SECRET` bearer-token check applies identically to both
+verbs, and happens to be exactly the header Vercel's own Cron feature sends
+automatically when `CRON_SECRET` is set on the project — no
+Vercel-specific code needed for that part.
+
+### Why Sentry uses the classic config files, not `instrumentation.ts`
+
+`@sentry/nextjs` (v10) warns at build time that `sentry.server.config.ts`/
+`sentry.edge.config.ts` are deprecated in favor of an `instrumentation.ts`
+file's `register()` function, and that `sentry.client.config.ts` should
+become `instrumentation-client.ts`. Checked against this project's own
+pinned Next version before following that suggestion (per "Working in this
+codebase" above): `instrumentation-client.ts` doesn't exist as a Next.js
+convention at all until Next 15.3, and `instrumentation.ts` itself needs
+`experimental.instrumentationHook: true` on Next 14 (it's only on-by-default
+starting Next 15) — neither fits a project that deliberately stays on
+Next 14's stable, non-experimental surface (see "Why Next.js 14" above). The
+classic per-runtime config files remain fully supported by the SDK — it's a
+deprecation warning, not a breaking removal — so this project keeps them and
+accepts the three build-time warnings as expected/known rather than opting
+into an experimental flag to silence them.
+
+### `/api/debug-sentry` note
+
+[`app/api/debug-sentry/route.ts`](app/api/debug-sentry/route.ts) always
+throws, by design, so hitting it once after deploying is how you confirm
+Sentry is actually receiving events rather than just failing to error
+silently. It's `force-dynamic` (Next's build-time static prerendering pass
+would otherwise invoke the handler and fail the whole build on this route's
+intentional throw — see the comment in the file) and sits behind the same
+login as everything else, so it's not a public-anonymous crash button.
 
 ## Known simplifications / not yet built
 
-- **No auth** — single hardcoded default user (see above). Required before
-  multi-user or public deployment.
+- **Auth is a single shared password, not per-user accounts** — Phase 7's
+  login gate (see "Auth" above) proves you're *the* person who has the
+  password; it doesn't model more than one real user. There's still exactly
+  one `User` row (`lib/currentUser.ts`), with no ownership checks on any
+  route. Fine as long as this stays a personal, single-user app; would need
+  real per-user accounts (and per-route ownership checks) before a second
+  real person uses it.
 - **Streak is tracked but not yet displayed** — `User.currentStreak` is
   computed and persisted on every submission (see "Streak semantics"), but
   no UI surfaces it yet; HISTORY still shows only the calendar, no streak
@@ -847,7 +1078,7 @@ phase — Phase 2 and Phase 5's backend logic now both have direct coverage.
   response, so wiring up a display is UI-only.
 - **Category preferences are global, not per-user** —
   `Category.enabledByDefault` is a single column on `Category`, toggled
-  directly by SETTINGS. Fine for a single-user app (see "No auth in v1");
+  directly by SETTINGS. Fine for a single-user app (see "Auth" above);
   would need a `UserCategoryPreference` join table before a second real
   user exists, since today one user's toggle affects everyone.
 - **HISTORY has no pagination or year view** — every submitted session is
@@ -866,16 +1097,19 @@ phase — Phase 2 and Phase 5's backend logic now both have direct coverage.
   the automatic post-expiry submission screen, so no early-submit button
   exists yet. The `/submit` endpoint itself has no deadline gate, so
   adding the button later is a UI-only change.
-- **Review page has no auth** — `/admin/questions` is "not public-facing"
-  only in the sense of not being linked from `NavTabs`; anyone with the URL
-  and network access to the app can open and use it. Same posture as the
-  rest of the app (see "No auth in v1"), but worth calling out separately
-  since this page can publish content, not just view it.
-- **No scheduler wired up** — `POST /api/jobs/news-questions` and `POST
-  /api/jobs/ai-questions` exist as trigger endpoints (optionally gated by
-  `CRON_SECRET`) but nothing calls them on a schedule yet. Needs an
-  external cron (system crontab + `curl`, or a `vercel.json` Cron Jobs
-  entry once this is deployed to Vercel) pointed at them.
+- **Review page has no *extra* auth beyond the app-wide login** —
+  `/admin/questions` sits behind the same shared-password gate as every
+  other page (see "Auth" above) but nothing further; anyone who has logged
+  in — the one real user, by design — can publish AI-generated/news-derived
+  questions straight to the approved pool from this page. Worth calling out
+  separately since it can publish content, not just view it, but not a real
+  risk while there's only one legitimate person with the password.
+- **Scheduler is now wired up, but only on Vercel** — `vercel.json`'s
+  `crons` entries hit `GET /api/jobs/news-questions` and
+  `GET /api/jobs/ai-questions` daily once deployed (see "Deployment"
+  below). Locally, or on any host other than Vercel, nothing calls them —
+  you'd still need a system crontab + `curl` (`POST`, with a
+  `CRON_SECRET` bearer token) pointed at them yourself.
 - **AI-generated questions have no automated content safeguard** — the
   news path has the keyword denylist; the philosophy/personal-life
   generation path relies entirely on the generation prompt plus your own

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import NavTabs from "@/components/NavTabs";
+import { PostHogProvider } from "@/components/analytics/PostHogProvider";
 import "./globals.css";
 
 const inter = Inter({ subsets: ["latin"] });
@@ -18,8 +19,10 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={inter.className}>
-        <NavTabs />
-        {children}
+        <PostHogProvider>
+          <NavTabs />
+          {children}
+        </PostHogProvider>
       </body>
     </html>
   );

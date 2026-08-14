@@ -12,13 +12,16 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",
     "@prisma/client": "^6.19.3",
+    "@sentry/nextjs": "^10.70.0",
     "@tiptap/core": "^3.30.1",
     "@tiptap/extension-character-count": "^3.30.1",
     "@tiptap/extension-text-style": "^3.30.1",
     "@tiptap/pm": "^3.30.1",
     "@tiptap/react": "^3.30.1",
     "@tiptap/starter-kit": "^3.30.1",
+    "jose": "^6.2.8",
     "next": "^14.2.35",
+    "posthog-js": "^1.417.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "zod": "^4.4.3"

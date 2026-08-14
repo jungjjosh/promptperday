@@ -23,6 +23,8 @@ export default defineConfig({
     env: {
       DATABASE_URL: process.env.DATABASE_URL ?? "",
       NEWS_API_KEY: process.env.NEWS_API_KEY ?? "",
+      AUTH_SECRET: process.env.AUTH_SECRET ?? "",
+      APP_PASSWORD: process.env.APP_PASSWORD ?? "",
     },
   },
 });

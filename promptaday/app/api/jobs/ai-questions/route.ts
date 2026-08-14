@@ -31,3 +31,8 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }
+
+// See news-questions/route.ts's GET comment: Vercel Cron only issues GET
+// requests, with no body, so `body?.category` above resolves to undefined
+// and both categories run — the right default for a scheduled trigger.
+export const GET = POST;
