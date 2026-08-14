@@ -34,8 +34,14 @@ export async function resetDb() {
 
 let userCounter = 0;
 
+// User.id has no DB default as of Phase 8 (it's meant to be a real Clerk
+// user id, supplied by lib/currentUser.ts's getOrCreateUser() — see
+// prisma/schema.prisma) — so tests supply a fake-but-Clerk-shaped id
+// themselves. Pair this with tests/clerkMock.ts's setMockClerkUserId(id)
+// before calling a route handler that checks auth()/ownership.
 export async function createTestUser(
   overrides: Partial<{
+    id: string;
     email: string;
     timezone: string;
     prepDurationMinutes: number;
@@ -44,6 +50,7 @@ export async function createTestUser(
   userCounter += 1;
   return prisma.user.create({
     data: {
+      id: overrides.id ?? `user_test_${userCounter}`,
       email: overrides.email ?? `test-user-${userCounter}@example.com`,
       timezone: overrides.timezone ?? "America/New_York",
       prepDurationMinutes: overrides.prepDurationMinutes ?? 10,

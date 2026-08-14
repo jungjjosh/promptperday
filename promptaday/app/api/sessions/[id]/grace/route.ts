@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { auth } from "@clerk/nextjs/server";
 import { prisma } from "@/lib/prisma";
 
 const GRACE_SECONDS = 60;
@@ -9,6 +10,14 @@ export async function POST(
 ) {
   const session = await prisma.session.findUnique({ where: { id: params.id } });
   if (!session) {
+    return NextResponse.json({ error: "Session not found" }, { status: 404 });
+  }
+
+  // Ownership check (Phase 8): 404, not 403, for a session that exists but
+  // belongs to someone else — same response as "doesn't exist" so this
+  // route never confirms another account's session id is valid.
+  const { userId: clerkUserId } = await auth();
+  if (!clerkUserId || session.userId !== clerkUserId) {
     return NextResponse.json({ error: "Session not found" }, { status: 404 });
   }
 

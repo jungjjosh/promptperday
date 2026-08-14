@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
+import { auth } from "@clerk/nextjs/server";
 import { SessionStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { getOrCreateUser } from "@/lib/currentUser";
 import { localDateKey } from "@/lib/timezone";
 import {
   NoCategoriesAvailableError,
@@ -11,17 +13,20 @@ import {
 
 const WRITE_DURATION_MINUTES = 5;
 
-export async function POST(request: NextRequest) {
-  const body = await request.json().catch(() => null);
-  const userId = body?.userId;
-  if (!userId || typeof userId !== "string") {
-    return NextResponse.json({ error: "userId is required" }, { status: 400 });
+// Phase 8: the acting user comes from the Clerk session, never from the
+// request body — a client-supplied userId here was the whole point of the
+// no-auth/single-shared-password eras' "every route trusts whatever userId
+// is passed to it" trade-off (see CLAUDE.md's "Auth" section history),
+// which stopped being acceptable the moment more than one real account
+// could exist.
+export async function POST(_request: NextRequest) {
+  const { userId: clerkUserId } = await auth();
+  if (!clerkUserId) {
+    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
 
-  const user = await prisma.user.findUnique({ where: { id: userId } });
-  if (!user) {
-    return NextResponse.json({ error: "User not found" }, { status: 404 });
-  }
+  const user = await getOrCreateUser();
+  const userId = user.id;
 
   const now = new Date();
   const todayKey = localDateKey(now, user.timezone);

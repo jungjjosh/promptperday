@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { auth } from "@clerk/nextjs/server";
 import { SessionStatus, Visibility } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { EMPTY_DOCUMENT } from "@/lib/richText";
@@ -12,6 +13,13 @@ export async function POST(
   if (!session) {
     return NextResponse.json({ error: "Session not found" }, { status: 404 });
   }
+
+  // Ownership check (Phase 8) — see grace/route.ts's comment.
+  const { userId: clerkUserId } = await auth();
+  if (!clerkUserId || session.userId !== clerkUserId) {
+    return NextResponse.json({ error: "Session not found" }, { status: 404 });
+  }
+
   if (session.status === SessionStatus.SUBMITTED) {
     return NextResponse.json(
       { error: "Session already submitted" },
@@ -31,9 +39,11 @@ export async function POST(
 
   // Read outside the transaction to decide the new streak value — same
   // non-transactional-read posture as /start's already-submitted-today
-  // check; this is a single-user app so the race window isn't a practical
-  // concern (see "/start and /reroll hardening" in CLAUDE.md for the same
-  // trade-off elsewhere).
+  // check; the race window is between one account's own concurrent
+  // requests (e.g. two tabs), not across accounts, since the ownership
+  // check above already confirmed this session belongs to the caller (see
+  // "/start and /reroll hardening" in CLAUDE.md for the same trade-off
+  // elsewhere).
   const user = await prisma.user.findUniqueOrThrow({ where: { id: session.userId } });
   const nextStreak = await computeNextStreak(prisma, user, session);
 

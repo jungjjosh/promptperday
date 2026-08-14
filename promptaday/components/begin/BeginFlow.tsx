@@ -25,10 +25,8 @@ function derivePhase(state: TodaySessionState): Phase {
 }
 
 export default function BeginFlow({
-  userId,
   initialState,
 }: {
-  userId: string;
   initialState: TodaySessionState;
 }) {
   const [phase, setPhase] = useState<Phase>(() => derivePhase(initialState));
@@ -37,11 +35,9 @@ export default function BeginFlow({
   );
 
   const handleStart = useCallback(async () => {
-    const res = await fetch("/api/sessions/start", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ userId }),
-    });
+    // No userId in the body — /start derives the acting user from the
+    // Clerk session itself (see app/api/sessions/start/route.ts).
+    const res = await fetch("/api/sessions/start", { method: "POST" });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error ?? "Failed to start session");
 
@@ -57,7 +53,7 @@ export default function BeginFlow({
       graceUsed: false,
     });
     setPhase("prepping");
-  }, [userId]);
+  }, []);
 
   const handleReroll = useCallback((updated: Partial<ActiveSessionData>) => {
     setSession((prev) => (prev ? { ...prev, ...updated } : prev));

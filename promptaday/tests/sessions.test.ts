@@ -1,10 +1,11 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { NextRequest } from "next/server";
 import { SessionStatus } from "@prisma/client";
 import { POST as startSession } from "@/app/api/sessions/start/route";
 import { POST as rerollSession } from "@/app/api/sessions/[id]/reroll/route";
 import { POST as graceSession } from "@/app/api/sessions/[id]/grace/route";
 import { PATCH as patchContent } from "@/app/api/sessions/[id]/content/route";
+import { setMockClerkUserId } from "./clerkMock";
 import {
   createRawSession,
   createTestUser,
@@ -24,15 +25,18 @@ beforeEach(async () => {
   await resetDb();
 });
 
+afterEach(() => {
+  setMockClerkUserId(null);
+});
+
 describe("POST /api/sessions/start", () => {
   it("sets prep_ends_at and write_ends_at based on the user's prep duration, fixed at start", async () => {
     const user = await createTestUser({ prepDurationMinutes: 10 });
+    setMockClerkUserId(user.id);
     const before = Date.now();
 
     const res = await startSession(
-      jsonRequest("http://localhost/api/sessions/start", "POST", {
-        userId: user.id,
-      }),
+      jsonRequest("http://localhost/api/sessions/start", "POST"),
     );
     const body = await res.json();
 
@@ -54,6 +58,13 @@ describe("POST /api/sessions/start", () => {
     expect(stored.writeEndsAt.getTime()).toBe(writeEndsAt);
   });
 
+  it("rejects with 401 when there's no authenticated Clerk session", async () => {
+    const res = await startSession(
+      jsonRequest("http://localhost/api/sessions/start", "POST"),
+    );
+    expect(res.status).toBe(401);
+  });
+
   it("rejects a second session start with 409 if the user already submitted today", async () => {
     const user = await createTestUser({ timezone: "America/New_York" });
     await createRawSession({
@@ -61,11 +72,10 @@ describe("POST /api/sessions/start", () => {
       status: SessionStatus.SUBMITTED,
       startedAt: new Date(),
     });
+    setMockClerkUserId(user.id);
 
     const res = await startSession(
-      jsonRequest("http://localhost/api/sessions/start", "POST", {
-        userId: user.id,
-      }),
+      jsonRequest("http://localhost/api/sessions/start", "POST"),
     );
 
     expect(res.status).toBe(409);
@@ -79,11 +89,10 @@ describe("POST /api/sessions/start", () => {
       status: SessionStatus.SUBMITTED,
       startedAt: yesterday,
     });
+    setMockClerkUserId(user.id);
 
     const res = await startSession(
-      jsonRequest("http://localhost/api/sessions/start", "POST", {
-        userId: user.id,
-      }),
+      jsonRequest("http://localhost/api/sessions/start", "POST"),
     );
 
     expect(res.status).toBe(201);
@@ -93,6 +102,7 @@ describe("POST /api/sessions/start", () => {
 describe("POST /api/sessions/:id/reroll", () => {
   it("succeeds once and then rejects any further reroll of either type", async () => {
     const session = await createRawSession();
+    setMockClerkUserId(session.userId);
 
     const first = await rerollSession(
       jsonRequest(
@@ -129,6 +139,22 @@ describe("POST /api/sessions/:id/reroll", () => {
     );
     expect(third.status).toBe(400);
   });
+
+  it("rejects with 404 when the caller doesn't own the session", async () => {
+    const session = await createRawSession();
+    const otherUser = await createTestUser();
+    setMockClerkUserId(otherUser.id);
+
+    const res = await rerollSession(
+      jsonRequest(
+        `http://localhost/api/sessions/${session.id}/reroll`,
+        "POST",
+        { type: "question" },
+      ),
+      { params: { id: session.id } },
+    );
+    expect(res.status).toBe(404);
+  });
 });
 
 describe("POST /api/sessions/:id/grace", () => {
@@ -136,6 +162,7 @@ describe("POST /api/sessions/:id/grace", () => {
     const session = await createRawSession({
       writeEndsAt: new Date(Date.now() + 60_000),
     });
+    setMockClerkUserId(session.userId);
 
     const first = await graceSession(
       jsonRequest(`http://localhost/api/sessions/${session.id}/grace`, "POST"),
@@ -154,12 +181,27 @@ describe("POST /api/sessions/:id/grace", () => {
     const session = await createRawSession({
       writeEndsAt: new Date(Date.now() - 1_000),
     });
+    setMockClerkUserId(session.userId);
 
     const res = await graceSession(
       jsonRequest(`http://localhost/api/sessions/${session.id}/grace`, "POST"),
       { params: { id: session.id } },
     );
     expect(res.status).toBe(400);
+  });
+
+  it("rejects with 404 when the caller doesn't own the session", async () => {
+    const session = await createRawSession({
+      writeEndsAt: new Date(Date.now() + 60_000),
+    });
+    const otherUser = await createTestUser();
+    setMockClerkUserId(otherUser.id);
+
+    const res = await graceSession(
+      jsonRequest(`http://localhost/api/sessions/${session.id}/grace`, "POST"),
+      { params: { id: session.id } },
+    );
+    expect(res.status).toBe(404);
   });
 });
 
@@ -169,6 +211,7 @@ describe("PATCH /api/sessions/:id/content", () => {
       writeEndsAt: new Date(Date.now() - 1_000),
       graceUsed: false,
     });
+    setMockClerkUserId(session.userId);
 
     const res = await patchContent(
       jsonRequest(
@@ -186,6 +229,7 @@ describe("PATCH /api/sessions/:id/content", () => {
       writeEndsAt: new Date(Date.now() - 30_000),
       graceUsed: true,
     });
+    setMockClerkUserId(session.userId);
 
     const res = await patchContent(
       jsonRequest(
@@ -203,6 +247,7 @@ describe("PATCH /api/sessions/:id/content", () => {
       writeEndsAt: new Date(Date.now() - 90_000),
       graceUsed: true,
     });
+    setMockClerkUserId(session.userId);
 
     const res = await patchContent(
       jsonRequest(
@@ -213,5 +258,23 @@ describe("PATCH /api/sessions/:id/content", () => {
       { params: { id: session.id } },
     );
     expect(res.status).toBe(403);
+  });
+
+  it("rejects with 404 when the caller doesn't own the session", async () => {
+    const session = await createRawSession({
+      writeEndsAt: new Date(Date.now() + 60_000),
+    });
+    const otherUser = await createTestUser();
+    setMockClerkUserId(otherUser.id);
+
+    const res = await patchContent(
+      jsonRequest(
+        `http://localhost/api/sessions/${session.id}/content`,
+        "PATCH",
+        { content: { text: "draft" } },
+      ),
+      { params: { id: session.id } },
+    );
+    expect(res.status).toBe(404);
   });
 });

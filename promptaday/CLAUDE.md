@@ -1,7 +1,7 @@
 # promptperday — Project Reference
 
 This is the standing source of truth for this project. It describes everything
-built so far (Phases 1–7) in enough detail that a skilled developer could
+built so far (Phases 1–8) in enough detail that a skilled developer could
 recreate the project from scratch without guessing at a decision: the stack,
 the exact data model and why each field exists, every API route's contract,
 the BEGIN tab's UI architecture, and every deliberate simplification or
@@ -34,19 +34,29 @@ remains canonical. Do not re-add an `@AGENTS.md` import here if that happens.
 
 ## Product scope (v1 MVP)
 
-promptperday is a single-user, web-first daily writing app. Each day the user
-gets exactly one writing prompt (a random category + question), goes through
-a timed prep phase and a timed write phase, then submits what they wrote.
+promptperday is a web-first daily writing app: each day, each user gets
+exactly one writing prompt (a random category + question), goes through a
+timed prep phase and a timed write phase, then submits what they wrote. The
+"single-user" framing in this document (and in the original spec) describes
+what any one account experiences — one prompt a day, one streak, one
+history — not a claim that the app only supports one account. As of Phase 8
+it genuinely doesn't: real, isolated multi-account support via Clerk is
+covered in "Auth" below. Some things built in earlier phases before that
+existed are still explicitly account-agnostic/global by design (see
+Category preferences, next) — those are called out individually, not implied
+by "single-user" language elsewhere in this document.
 
 **Four tabs:** BEGIN, HISTORY, SETTINGS, WHY? — all four are functional as of
 Phase 4.
 
 **Categories (seeded):** current events, philosophy, personal life —
-toggleable via SETTINGS. Note the toggle is currently **global**
-(`Category.enabledByDefault`), not per-user — see "Auth" / "Known
-simplifications" below; for a single-user app this is functionally identical
-to a per-user toggle, but it would need a join table (e.g.
-`UserCategoryPreference`) before a second real user exists.
+toggleable via SETTINGS. The toggle is **global**
+(`Category.enabledByDefault`), not per-account — one account's toggle
+affects every other account's daily category pool too. This predates
+Phase 8's real multi-account support (see "Auth" below) and was an
+acceptable simplification when there was only ever one real user; it's a
+live, real gap now that a second real account can actually exist — see
+"Known simplifications."
 
 **Explicitly out of scope for v1** (per the original spec): image upload,
 Google Docs export, social feed, and any functional Friends/Public visibility
@@ -144,7 +154,7 @@ case described above.
 | Tests | Vitest | 4.1.10 | Runs against a real second Postgres database, not mocks — see "Testing" below. |
 | Lint | ESLint | 8.57.1 (`eslint-config-next@14`) | Pinned to v8 because `eslint-config-next@14` doesn't support ESLint 9's flat config; `create-next-app` scaffolds ESLint 9 by default. |
 | LLM | `@anthropic-ai/sdk` | 0.117.1, model `claude-opus-5` | Phase 5's AI-generated-question job. Structured output via `client.messages.parse()` + `zodOutputFormat` (needs `zod` ^4, installed alongside). |
-| Auth | `jose` | 6.2.8 | Phase 7's session cookie (see "Auth" below). Chosen over `next-auth`/Auth.js because there's only one real user — no accounts, providers, or per-user sessions to justify a full auth library; `jose` is a minimal, Edge-Runtime-compatible JWT sign/verify primitive that works identically in `middleware.ts` (Edge) and the login route (Node). |
+| Auth | `@clerk/nextjs` | 6.39.6 | Phase 8, replacing Phase 7's shared-password gate (see "Auth" below). Pinned to the 6.x line specifically — `@clerk/nextjs@7` requires Next ^15.2.8+; 6.39.6 is the latest release whose peer range (`^13.5.7 \|\| ^14.2.25 \|\| ^15.2.3 \|\| ^16`) still covers this project's pinned Next 14.2.35. Chosen over building per-user auth from scratch or Supabase Auth: real signup/login/session handling without writing it, and — unlike Supabase Auth, which centers on Supabase's own Postgres — it's a pure identity provider that doesn't care which Postgres host the app's own data lives on (this project uses Neon, per "Deployment" below), so adding it doesn't entangle two different services' opinions about where the database lives. |
 | Error tracking | `@sentry/nextjs` | 10.70.0 | Phase 7. Classic per-runtime config files (`sentry.{client,server,edge}.config.ts`), not the newer `instrumentation.ts`/`instrumentation-client.ts` convention — see "Deployment" below for why. |
 | Analytics | `posthog-js` | 1.417.1 | Phase 7, client-side only. Basic autocapture + manually-captured pageviews (App Router navigations aren't full page loads, so PostHog's own pageview autocapture never fires) — see "Deployment" below. |
 
@@ -185,13 +195,13 @@ createdb promptperday_test  # test database (Vitest's globalSetup migrates/seeds
 # 3. Environment files (gitignored — not committed)
 echo 'DATABASE_URL="postgresql://<you>@localhost:5432/promptperday?schema=public"' > .env
 echo 'DATABASE_URL="postgresql://<you>@localhost:5432/promptperday_test?schema=public"' > .env.test
-# Required as of Phase 7 — the app won't start (and /login won't work)
-# without both. AUTH_SECRET signs the session cookie; APP_PASSWORD is what
-# you type into /login. See "Auth" below.
-echo "AUTH_SECRET=\"$(openssl rand -base64 32)\"" >> .env
-echo 'APP_PASSWORD="devpassword"' >> .env
-echo 'AUTH_SECRET="test-auth-secret-not-a-real-credential"' >> .env.test
-echo 'APP_PASSWORD="test-password-not-a-real-credential"' >> .env.test
+# Required as of Phase 8 — the app won't start at all without both, and
+# nobody can actually sign in until they're real. Create a free app at
+# clerk.com and paste in its keys; see "Auth" below for the full runbook.
+echo 'NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY="pk_test_<your Clerk publishable key>"' >> .env
+echo 'CLERK_SECRET_KEY="sk_test_<your Clerk secret key>"' >> .env
+# No Clerk keys needed in .env.test — tests/setupClerkMock.ts mocks
+# @clerk/nextjs/server entirely, so the suite never talks to Clerk.
 # Only needed to actually run the Phase 5 jobs (not needed for the rest of
 # the app, and the test suite mocks both — see .env.test's NEWS_API_KEY,
 # which is a placeholder string, never a real key):
@@ -209,7 +219,7 @@ npx prisma migrate dev
 npx prisma db seed
 
 # 5. Run it
-npm run dev          # http://localhost:3000 — redirects to /login; sign in with APP_PASSWORD
+npm run dev          # http://localhost:3000 — redirects to /sign-in
 npm test              # vitest — migrates/seeds promptperday_test itself, no manual step needed
 npm run build          # production build sanity check
 ```
@@ -285,19 +295,30 @@ Session lifecycle routes live under `app/api/sessions/`; Phase 4 added
 `app/api/categories/[id]` and `app/api/users/[id]`; Phase 5 added
 `app/api/questions/[id]` and the job-trigger routes under `app/api/jobs/`
 (documented in "Question sourcing and review" below, not repeated here).
-As of Phase 7, every route below sits behind the session-cookie check in
+Every route below sits behind Clerk's session check in
 [`middleware.ts`](middleware.ts) (see "Auth" below) except the two
 job-trigger routes, which use their own `CRON_SECRET` check instead — an
-external scheduler has no session to send. Within a route, there's still no
-per-request ownership check: every route trusts whatever `userId` / `:id`
-is passed to it, which is fine given there's still exactly one real user
-account behind the login (see "Auth").
+external scheduler has no Clerk session to send. As of Phase 8, most
+`:id`-scoped routes also do their own **ownership check**: being
+authenticated is no longer enough on its own, since more than one real
+account can now exist, and a session/entry/user `:id` is just an opaque
+string a curious authenticated account could otherwise guess or copy from
+their own network tab. Each route's entry below says explicitly whether it
+checks ownership; see "Auth" for why the check is a plain string comparison
+rather than an extra database lookup.
 
 ### POST `/api/sessions/start`
 
-Body: `{ userId: string }`
+No body — the acting user comes from the Clerk session (`auth()`), not a
+request field. Through Phase 7 this took `{ userId: string }` in the body
+and trusted it outright; that stopped being safe the moment a second real
+account could exist; see "Auth" below.
 
-1. 404 if the user doesn't exist.
+1. 401 if there's no authenticated Clerk session. Otherwise resolves (and,
+   on a first-ever request from this account, lazily creates) the acting
+   user via `getOrCreateUser()` — see "Auth" below. There's no "user
+   doesn't exist" 404 case anymore; a valid Clerk session always resolves
+   to a real `User` row, created on demand if needed.
 2. 409 (`"Already submitted a prompt today"`) if the user has a `Session`
    with `status = SUBMITTED` whose `startedAt`, converted to the user's
    stored timezone, falls on today's local calendar date.
@@ -321,7 +342,9 @@ Body: `{ userId: string }`
 Body: `{ type: "category" | "question" }`
 
 - 400 if `type` is neither value.
-- 404 if the session doesn't exist.
+- 404 if the session doesn't exist **or belongs to a different account**
+  (Phase 8 — same response either way, so this never confirms another
+  account's session id is valid; see "Auth" below).
 - 409 if the session is already `SUBMITTED`.
 - 400 (`"Reroll already used for this session"`) if `rerollUsed` is already
   true — applies regardless of which `type` is requested; there is exactly
@@ -335,7 +358,7 @@ Body: `{ type: "category" | "question" }`
 
 ### POST `/api/sessions/:id/grace`
 
-- 404 if the session doesn't exist.
+- 404 if the session doesn't exist or belongs to a different account (Phase 8 — see "Auth" below).
 - 400 if `graceUsed` is already true.
 - 400 if `now > writeEndsAt` (too late to ask for grace).
 - Sets `graceUsed = true`.
@@ -346,7 +369,7 @@ Body: `{ type: "category" | "question" }`
 
 Body: `{ content: <TipTap JSON> }`
 
-- 404 if the session doesn't exist.
+- 404 if the session doesn't exist or belongs to a different account (Phase 8 — see "Auth" below).
 - 403 if `now` is past the effective deadline (`writeEndsAt`, or
   `writeEndsAt + 60s` if `graceUsed`).
 - Upserts `Entry` by `sessionId` (creating it with default
@@ -361,7 +384,7 @@ Body: `{ content: <TipTap JSON> }`
 
 Body: `{ title?, description?, sources?: string[] }`
 
-- 404 if the session doesn't exist.
+- 404 if the session doesn't exist or belongs to a different account (Phase 8 — see "Auth" below).
 - 409 if already `SUBMITTED`.
 - Upserts `Entry` (in case autosave never fired — falls back to an empty
   TipTap document for `content` if no prior autosave exists) with the given
@@ -382,7 +405,9 @@ Body: `{ title?, description?, sources?: string[] }`
 
 ### DELETE `/api/sessions/:id/entry` — added in Phase 3, not part of the original four
 
-- 404 if no `Entry` exists for that session.
+- 404 if no `Entry` exists for that session, or it belongs to a different
+  account (Phase 8 — checked against `Entry.userId` directly, no extra
+  `Session` lookup needed; see "Auth" below).
 - Deletes the `Entry` row. Does **not** touch the `Session` row.
 - 200, body: `{ deleted: true }`.
 - This is what "Delete" on the submission screen calls. Because `/start`'s
@@ -422,7 +447,9 @@ Body: `{ enabledByDefault: boolean }`
 
 Body: `{ prepDurationMinutes: number }`
 
-- 404 if the user doesn't exist.
+- 404 if `:id` doesn't match the authenticated Clerk session (Phase 8 — an
+  account can only ever update its own settings; see "Auth" below) or the
+  user otherwise doesn't exist.
 - 400 if `prepDurationMinutes` isn't one of `5, 10, 15, 20`.
 - 200, body: `{ id, prepDurationMinutes }`.
 - This is what SETTINGS' prep-duration dropdown calls. `/start` already
@@ -442,68 +469,132 @@ call) — cheap to guard against, so it's guarded.
 
 ## Auth
 
-**Through Phase 6, there was no login at all** — this is still a
-single-user, personal app, and that part hasn't changed: `lib/currentUser.ts`
-still resolves to one lazily created `User` row
-(`you@promptperday.local`, timezone taken from
-`Intl.DateTimeFormat().resolvedOptions().timeZone` at creation time), and
-every API route still trusts whatever `userId` / session `:id` it's given
-with no per-request ownership check — there's still only one real user, so
-there's nothing to check ownership *against*.
+Auth has gone through three distinct eras, each worth understanding because
+later phases build on the trade-offs the earlier ones made:
 
-**Phase 7 added a real login gate in front of that single user** — not a
-multi-user account system, but a single shared app password that must be
-entered before any page or API route (other than `/api/jobs/*`, see below)
-will respond. This exists specifically so a deployed, publicly-reachable URL
-isn't wide open to anyone who finds it, which mattered once "deployed
-somewhere reachable by others" stopped being hypothetical.
+- **Through Phase 6**: no login at all. `lib/currentUser.ts` resolved to one
+  lazily created `User` row (`you@promptperday.local`), and every route
+  trusted whatever `userId` / session `:id` it was given — fine, because
+  there was exactly one real user and nothing to check ownership against.
+- **Phase 7**: a single shared app password (`APP_PASSWORD`) gated the whole
+  app behind one login, so a deployed URL wasn't wide open to anyone who
+  found it. Still one real user underneath — routes still trusted
+  client-supplied ids, just as before.
+- **Phase 8 (current)**: real per-account identity via Clerk — the subject
+  of the rest of this section. The Phase 7 shared-password gate
+  (`lib/auth.ts`, the old `middleware.ts`, `/login`,
+  `/api/auth/{login,logout}`) has been deleted outright, not layered under.
 
-**How it works:**
+### How Clerk is wired in
 
-- [`lib/auth.ts`](lib/auth.ts) signs/verifies a stateless session token
-  (`jose`'s `SignJWT`/`jwtVerify`, HS256, keyed by the `AUTH_SECRET` env
-  var) — granular `jose/jwt/sign` and `jose/jwt/verify` subpath imports, not
-  the top-level `jose` package, specifically to keep the unused JWE
-  (encryption) code — which pulls in `CompressionStream`/
-  `DecompressionStream`, unavailable in the Edge Runtime — out of the
-  bundle `middleware.ts` ships to the edge.
-- `POST /api/auth/login` ([`app/api/auth/login/route.ts`](app/api/auth/login/route.ts))
-  compares the submitted password against the `APP_PASSWORD` env var (hashed
-  both sides with SHA-256 first, then `crypto.timingSafeEqual`, so a length
-  mismatch can't throw and leak the real password's length) and, on match,
-  sets an httpOnly, `Secure`-in-production, `SameSite=Lax` session cookie
-  (30-day expiry). There's no stored password hash in the database at all —
-  a single shared app password compared live against an env var doesn't need
-  one.
-- [`middleware.ts`](middleware.ts) runs on every request except `/login`,
-  `/api/auth/*`, and `/api/jobs/*` (Next's own static asset paths are
-  excluded via the matcher). No valid session cookie → page requests
-  redirect to `/login?next=<original path>`; API requests get a `401` JSON
-  body instead of a redirect (redirecting a `fetch()` call would just hand
-  the caller an HTML login page as if it were JSON).
-- `POST /api/auth/logout` clears the cookie. The nav shell
-  ([`components/NavTabs.tsx`](components/NavTabs.tsx)) has a "Log out"
-  button, and hides the whole nav bar on `/login` itself (checked via
-  `usePathname`, since the root layout that renders `NavTabs` is a Server
-  Component with no pathname to condition on server-side).
-- `/api/jobs/*` is deliberately **exempt** from the session-cookie check —
-  an external scheduler (Vercel Cron) has no browser session to send. Those
-  routes keep their own, separate `CRON_SECRET` bearer-token check (see
-  "Question sourcing and review" below), unchanged from Phase 5.
+- [`middleware.ts`](middleware.ts) uses `clerkMiddleware()` +
+  `createRouteMatcher(["/sign-in(.*)", "/sign-up(.*)", "/api/jobs(.*)"])`:
+  everything not matching that list requires a valid Clerk session
+  (`auth.protect()`), including every page and every API route documented
+  above. `/api/jobs/*` stays exempt for the same reason it always has —
+  Vercel Cron has no Clerk session to send, and keeps its own, separate
+  `CRON_SECRET` bearer-token check (unchanged since Phase 5).
+- [`app/layout.tsx`](app/layout.tsx) wraps the whole app in `<ClerkProvider>`.
+  [`app/sign-in/[[...sign-in]]/page.tsx`](app/sign-in/[[...sign-in]]/page.tsx)
+  and [`app/sign-up/[[...sign-up]]/page.tsx`](app/sign-up/[[...sign-up]]/page.tsx)
+  render Clerk's own prebuilt `<SignIn/>`/`<SignUp/>` components, unmodified
+  — catch-all routes (`[[...sign-in]]`) because Clerk's components handle
+  their own multi-step sub-routing (verification codes, etc.) internally.
+  [`components/NavTabs.tsx`](components/NavTabs.tsx) uses Clerk's
+  `<UserButton/>` for sign-out (its popover), and hides the whole nav bar on
+  `/sign-in`/`/sign-up` via `usePathname`.
+- **No social login, no custom email-verification UI, no account-settings
+  page** — explicitly out of scope for this phase. Clerk's default new-app
+  configuration (email + password, its own verification-code flow) is used
+  as-is; if you want social providers off, that's a one-time toggle in the
+  Clerk dashboard, not code here.
 
-**Why a shared password instead of `next-auth`/per-user accounts:** there is
-still only one real user (see above) — building out signup, per-user
-sessions, and password-reset flows for an account system with exactly one
-account would be pure ceremony. A single shared secret gate is the smallest
-change that turns "no login" into "you must be the person who has the
-password," which is what actually matters once this is live at a public URL.
-Revisit this if the app ever needs to support more than one real person.
+### `User.id` is Clerk's user id, not a generated one
+
+`prisma/schema.prisma`'s `User.id` lost its `@default(cuid())` this phase —
+it's `String @id` with no default, because the id is always supplied
+explicitly: [`lib/currentUser.ts`](lib/currentUser.ts)'s `getOrCreateUser()`
+calls Clerk's `auth()` to get the current `userId` (e.g. `user_2abc...`),
+looks up a `User` row with that exact id, and creates one (via Clerk's
+`currentUser()` for the real email; timezone still taken from
+`Intl.DateTimeFormat().resolvedOptions().timeZone` at creation time, same as
+before) if this is that account's first authenticated request. Every page
+(`app/page.tsx`, `app/history/page.tsx`, `app/settings/page.tsx`) calls this
+instead of the old `getOrCreateDefaultUser()`.
+
+This is also what makes the **ownership checks** on `:id`-scoped routes
+cheap: since `Session.userId` / `Entry.userId` are foreign keys into
+`User.id`, and `User.id` *is* the Clerk id, checking "does this session
+belong to the caller" is a plain string comparison —
+`session.userId !== (await auth()).userId` — no extra `User` lookup needed.
+Added to `POST /start`, `POST /:id/reroll`, `POST /:id/grace`,
+`PATCH /:id/content`, `POST /:id/submit`, `DELETE /:id/entry`, and
+`PATCH /api/users/:id` (see each route's entry above for its exact
+response); all return the same `404` for "doesn't exist" and "exists but
+isn't yours," so no route ever confirms another account's id is valid.
+`/api/categories/:id` and `/api/questions/:id` are deliberately **not**
+ownership-checked — `Category`/`Question` are shared, global resources, not
+account-owned (see "Known simplifications" for what that still means in a
+real multi-account world).
+
+### Migrating the pre-Clerk data
+
+The single pre-Clerk `User` row (`you@promptperday.local`, and everything
+that pointed at it — `Session`, `Entry`, `UserQuestionHistory` rows, plus
+its `prepDurationMinutes`/`currentStreak`) doesn't move to a real account
+automatically; nothing in the app does this for you, on purpose (see below).
+[`lib/legacyMigration.ts`](lib/legacyMigration.ts)'s `migrateLegacyUser`
+does the reassignment, wrapped in
+[`scripts/migrate-legacy-user.ts`](scripts/migrate-legacy-user.ts) as a
+one-time CLI script:
+
+```bash
+# 1. Sign in once via Clerk with your real account (creates that account's
+#    User row via getOrCreateUser(), lazily, on the first authenticated
+#    request — visit the app and sign up/in before running this).
+# 2. Then, from your machine:
+npx tsx scripts/migrate-legacy-user.ts you@your-real-email.com
+```
+
+It looks up the legacy row by its fixed placeholder email
+(`you@promptperday.local`) and the target row by the real email you pass
+in, then in one transaction: reassigns every `Session`/`Entry`/
+`UserQuestionHistory` row's `userId` from the legacy id to the real Clerk
+id, copies `prepDurationMinutes` and `currentStreak` onto the real account,
+and deletes the now-empty legacy row. Throws
+`LegacyUserNotFoundError`/`TargetUserNotFoundError` with a clear message if
+either side isn't in the state it expects (see
+[`tests/legacyMigration.test.ts`](tests/legacyMigration.test.ts) for both
+cases plus the full-success path).
+
+**Deliberately a manual, human-triggered script, not automatic "claim on
+first login" logic in the app.** "Adopt the old single-user data" only
+makes sense once, for the one real bootstrap account — if the app did this
+automatically for every new signup, the *second* real person who ever
+creates an account would silently inherit the first person's private
+entries. A one-time script run by hand has no such failure mode.
+
+### Why Clerk, not Supabase Auth or hand-rolled per-user auth
+
+Both were on the table (the instruction that led to this phase named
+Clerk/Supabase Auth as options). Supabase Auth centers on Supabase's own
+Postgres (`auth.users` in Supabase's database) — using it while keeping this
+project's Neon-hosted Postgres (see "Deployment" below) for the app's own
+data would mean either migrating databases to Supabase or running Supabase
+Auth as a semi-standalone service against an external Postgres, more
+friction either way than a purpose-built identity provider that simply
+doesn't care where the app's database lives. Hand-rolling per-user auth
+(the Phase 7 shared-password approach, extended to real accounts) would
+mean building signup, password hashing/storage, verification emails, and
+session management from scratch for something several mature libraries
+already do correctly — not a good use of effort for a feature that's
+identity infrastructure, not this app's actual product.
 
 ## BEGIN tab UI architecture
 
 Entry point: [`app/page.tsx`](app/page.tsx) — an async Server Component. It:
 
-1. Resolves the default user (`getOrCreateDefaultUser`).
+1. Resolves the signed-in user (`getOrCreateUser` — see "Auth" above).
 2. Computes today's session state server-side (`getTodaySessionState`, in
    [`lib/todaySession.ts`](lib/todaySession.ts)) — mirrors `/start`'s
    day-boundary logic to return one of `idle` / `submitted` / `active` (with
@@ -517,7 +608,9 @@ Entry point: [`app/page.tsx`](app/page.tsx) — an async Server Component. It:
    prerender pass; this surfaced as a real bug during Phase 3 (`Unique
    constraint failed on the fields: (email)`, from the prerenderer invoking
    the page function more than once) and is fixed by forcing per-request
-   dynamic rendering.
+   dynamic rendering. As of Phase 8 there's a second, independent reason it
+   couldn't be static anyway: `getOrCreateUser()` calls Clerk's `auth()`,
+   which has no session to read at build time.
 4. Renders `<BeginFlow>`, a client component, with the server-computed
    initial state as a prop.
 
@@ -767,10 +860,11 @@ Both are POST routes, not routes with UI of their own:
 
 Both are gated by [`lib/cronAuth.ts`](lib/cronAuth.ts): if `CRON_SECRET` is
 set, requests need `Authorization: Bearer <secret>`; if unset, they're open.
-This is intentionally a *separate* check from Phase 7's session-cookie auth
-(see "Auth" above) rather than folding these routes into that gate — an
-external scheduler has no browser session to send, only a bearer token, and
-`middleware.ts` explicitly exempts `/api/jobs/*` for exactly that reason.
+This is intentionally a *separate* check from the Clerk auth covering every
+other route (see "Auth" above) rather than folding these routes into that
+gate — an external scheduler has no Clerk session to send, only a bearer
+token, and `middleware.ts` explicitly exempts `/api/jobs/*` for exactly
+that reason.
 **These routes are meant to be invoked by an external scheduler** — either
 a system cron entry running `curl -X POST .../api/jobs/news-questions`, or
 (now that this is actually deployed) the `vercel.json` Cron Jobs entries at
@@ -797,13 +891,14 @@ component [`components/admin/QuestionReview.tsx`](components/admin/QuestionRevie
 Approve/Reject call the PATCH route above and remove the card from the
 local list on success (no full reload). **Not linked in `NavTabs`** —
 reachable only at `/admin/questions` by direct URL. Before Phase 7 that URL
-obscurity was the *only* protection this page had; as of Phase 7 it also
-sits behind the same session-cookie gate as every other page (see "Auth"
-above), so being unlinked is now a secondary, defense-in-depth measure
-rather than the sole one. This is a narrower, earlier piece of the full
-"admin review dashboard" noted as a Known Simplification since Phase 3 —
-that dashboard is still a later phase; this page only does question
-moderation.
+obscurity was the *only* protection this page had; it now sits behind
+Clerk's auth like every other page (see "Auth" above), so being unlinked is
+a secondary, defense-in-depth measure rather than the sole one — but note
+that's just "requires *some* Clerk account," not "requires a specific one":
+see "Known simplifications" for what that means now that more than one real
+account can exist. This is a narrower, earlier piece of the full "admin
+review dashboard" noted as a Known Simplification since Phase 3 — that
+dashboard is still a later phase; this page only does question moderation.
 
 ## Nav shell
 
@@ -868,17 +963,59 @@ selection function `/start` uses) can now return it, where it couldn't
 before the approval; rejecting flips it to `ARCHIVED` and confirms it
 stays unselectable.
 
-[`tests/auth.test.ts`](tests/auth.test.ts) covers Phase 7's login: calls
-`POST /api/auth/login` directly and confirms a wrong or missing password
-gets a `401` with no cookie set, and the correct password (`APP_PASSWORD`
-from `.env.test`) gets a `200` with an httpOnly session cookie whose token
-`verifySessionToken` accepts; separately confirms `lib/auth.ts`'s
-sign/verify round-trip works and rejects a tampered or garbage token.
-`middleware.ts` itself isn't exercised by these tests — like the rest of
-this suite, they call route handler functions directly rather than booting
-a real Next server, and middleware only runs in that real request pipeline
-— so the redirect-to-`/login` / `401`-on-API behavior was instead verified
-manually in a real browser (see "Phase 7" in the manual-verification list
+**Phase 8 replaced `tests/auth.test.ts`** (tested the now-deleted
+shared-password login route) with two new files, plus a shared mocking
+setup:
+
+[`tests/setupClerkMock.ts`](tests/setupClerkMock.ts) (wired in via
+`vitest.config.mts`'s `setupFiles`, so it registers before any test file's
+own imports run) mocks `@clerk/nextjs/server`'s `auth()`/`currentUser()`
+entirely — the officially-documented way to test Clerk-protected code
+without a real Clerk project or network access, consistent with this
+project's existing rule that tests never hit real external services (same
+posture as the news/AI-question jobs' injectable clients). The mock reads
+its "current user" from [`tests/clerkMock.ts`](tests/clerkMock.ts)'s
+`setMockClerkUserId(id)` / `getMockClerkUserId()` — a plain state module,
+deliberately with no `vi.mock` call of its own (hoisting only guarantees a
+`vi.mock` call takes effect within the file that contains it, and
+`setupFiles` is what gives the actual registration in `setupClerkMock.ts`
+its early-enough guarantee). `createTestUser()` in `tests/helpers.ts` also
+changed: `User.id` has no DB default anymore (see "Auth" above), so it now
+requires an explicit, Clerk-shaped fake id (`user_test_N` by default).
+
+[`tests/dataIsolation.test.ts`](tests/dataIsolation.test.ts) is the direct,
+automated proof of Phase 8's core requirement: creates data as one mocked
+account, switches the mocked Clerk identity to a second account, and
+confirms the second account is refused (and the first account's data is
+left untouched) across every ownership-checked route —
+`reroll`/`grace`/`content`/`submit`/`entry`-delete (all `404`),
+`PATCH /api/users/:id` (`404`), plus `getHistoryEntries` and
+`User.currentStreak` never leaking between accounts, and a same-day
+`/start` from two different accounts each getting their own session. This
+doesn't replace manually verifying two real Clerk accounts in a browser
+(see "Phase 8" in the manual-verification list below) — it can't, without
+a real Clerk project — but it does mean the isolation *logic* is verified
+on every test run, not just once by hand.
+
+[`tests/legacyMigration.test.ts`](tests/legacyMigration.test.ts) covers
+`migrateLegacyUser`: the full-success path (sessions/entries/question-history
+reassigned, streak and prep duration carried over, legacy row deleted) and
+both failure modes (`LegacyUserNotFoundError` when there's nothing to
+migrate, `TargetUserNotFoundError` when the target hasn't signed in via
+Clerk yet).
+
+`sessions.test.ts` and `streak.test.ts` both gained `setMockClerkUserId(...)`
+calls in front of every route-handler call that now checks Clerk auth
+(`/start`, and every session `:id` route), plus a couple of new
+`404`-on-wrong-account cases in `sessions.test.ts` alongside their existing
+Phase 2/6 coverage — see those files directly rather than duplicating their
+descriptions here.
+
+`middleware.ts` itself isn't exercised by any of these tests — like the
+rest of this suite, they call route handler functions directly rather than
+booting a real Next server, and middleware only runs in that real request
+pipeline — so the redirect-to-`/sign-in` behavior was instead verified
+manually in a real browser (see "Phase 8" in the manual-verification list
 below).
 
 All test files call the exported route handler functions directly (e.g.
@@ -916,46 +1053,63 @@ real browser against the dev server instead:
   "becomes eligible" half of the Definition of Done is proven
   deterministically by the automated test above rather than by a
   probabilistic live `/start` call.
-- **Phase 7**: with the dev server running and no session cookie, confirmed
-  `/` redirects to `/login`; signed in with the wrong password and
-  confirmed an inline "Incorrect password" error with no redirect; signed
-  in with the correct `APP_PASSWORD` and confirmed a redirect to `/` with
-  the nav bar (and "Log out" button) now visible; confirmed HISTORY still
-  rendered correctly while authenticated; clicked "Log out" and confirmed
-  it redirected back to `/login`; via `curl`, confirmed `/api/debug-sentry`
-  returns `401` with no cookie and `500` (the route's intentional throw)
-  with a valid one, and checked the browser console for errors with
-  `NEXT_PUBLIC_SENTRY_DSN`/`NEXT_PUBLIC_POSTHOG_KEY` unset to confirm both
-  SDKs no-op cleanly rather than crashing the app when unconfigured.
+- **Phase 7** (superseded — `/login` and the shared-password flow it
+  describes no longer exist, replaced in Phase 8; kept here as an accurate
+  record of what was verified at the time): with the dev server running and
+  no session cookie, confirmed `/` redirects to `/login`; signed in with the
+  wrong password and confirmed an inline "Incorrect password" error with no
+  redirect; signed in with the correct `APP_PASSWORD` and confirmed a
+  redirect to `/` with the nav bar (and "Log out" button) now visible;
+  confirmed HISTORY still rendered correctly while authenticated; clicked
+  "Log out" and confirmed it redirected back to `/login`; via `curl`,
+  confirmed `/api/debug-sentry` returns `401` with no cookie and `500` (the
+  route's intentional throw) with a valid one, and checked the browser
+  console for errors with `NEXT_PUBLIC_SENTRY_DSN`/`NEXT_PUBLIC_POSTHOG_KEY`
+  unset to confirm both SDKs no-op cleanly rather than crashing the app
+  when unconfigured.
+- **Phase 8**: with the dev server running and only a syntactically-valid
+  *placeholder* Clerk publishable key configured (no real Clerk project —
+  see "Deployment" below), visiting `/` correctly redirected through
+  Clerk's real hosted handshake flow (`https://placeholder-app.clerk.accounts.dev/v1/client/handshake?...`),
+  which Clerk's own servers then correctly rejected with a clear
+  `"host_invalid"`/`"Invalid host"` JSON error — proving `middleware.ts` and
+  `<ClerkProvider>` are wired correctly and actually talking to Clerk's real
+  infrastructure, with the only missing piece being a real Clerk project
+  (a human step — see "Deployment"). A genuine end-to-end signup/login/
+  data-isolation check with two real accounts needs that real project and
+  is the one piece of this phase's Definition of Done left for you to
+  confirm; `tests/dataIsolation.test.ts` (above) is the automated proof of
+  the isolation *logic* underneath it.
 
 Worth adding real component/route tests for the Phase 3/4 UI in a later
-phase — Phase 2, Phase 5's backend logic, and Phase 7's login route now all
-have direct coverage.
+phase — Phase 2, Phase 5's backend logic, and Phase 8's auth/ownership
+logic now all have direct coverage.
 
-## Deployment (Phase 7)
+## Deployment (Phase 7–8)
 
 **What this needs, and who does it:** everything in this section that's
-*code* (Sentry/PostHog integration, `vercel.json`, the login gate) is
-already built and committed. Everything that's an *account* — Vercel,
-a Postgres host, Sentry, PostHog — had to be created by a human with actual
-credentials; an agent can prepare the code and write the runbook below, but
-can't sign up for services or hold API tokens on your behalf. Follow the
-runbook once per service, then every future `git push` to the connected
-branch redeploys automatically via Vercel's GitHub integration.
+*code* (Sentry/PostHog integration, `vercel.json`, Clerk's auth wiring, the
+legacy-migration script) is already built and committed. Everything that's
+an *account* — Vercel, a Postgres host, Sentry, PostHog, and now Clerk —
+had to be created by a human with actual credentials; an agent can prepare
+the code and write the runbook below, but can't sign up for services or
+hold API tokens on your behalf. Follow the runbook once per service, then
+every future `git push` to the connected branch redeploys automatically via
+Vercel's GitHub integration.
 
 ### Environment variable checklist
 
-Every variable the app reads, across all seven phases, in one place. "Local"
-values already live in `.env`/`.env.test` (gitignored) per the setup steps
-above; "Production" values get entered into the Vercel project's
-Settings → Environment Variables, not committed anywhere.
+Every variable the app reads, across all eight phases, in one place.
+"Local" values already live in `.env`/`.env.test` (gitignored) per the
+setup steps above; "Production" values get entered into the Vercel
+project's Settings → Environment Variables, not committed anywhere.
 
 | Variable | Phase | Required? | Purpose | Where to get it |
 |---|---|---|---|---|
 | `DATABASE_URL` | 1 | **Required** | Postgres connection the app queries through Prisma at runtime. | Local: your Homebrew Postgres. Production: Neon's **pooled** connection string (see note below). |
 | `DIRECT_DATABASE_URL`-equivalent | 1 | Only when migrating production | Not a schema/env var in this project (see note below) — the **direct** (unpooled) Neon connection string, used only when you personally run `prisma migrate deploy` against production. | Neon dashboard, same project as above. |
-| `AUTH_SECRET` | 7 | **Required** | Signs/verifies the session cookie (`lib/auth.ts`). Without it the app throws on every request. | Generate: `openssl rand -base64 32`. Different value in prod vs. local is fine (and preferred) — it only needs to be stable *within* one deployment. |
-| `APP_PASSWORD` | 7 | **Required** | The password `/login` checks against. | Pick one; this is what you'll actually type in to use the deployed app. |
+| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | 8 | **Required** | Client-side Clerk key — `<ClerkProvider>`, `<SignIn/>`/`<SignUp/>`, `<UserButton/>` all need it. Without a *real* one (a syntactically-valid placeholder is enough to build, not to actually authenticate anyone — see "Auth" above), sign-in/sign-up won't work. | Clerk dashboard → your app → API Keys. |
+| `CLERK_SECRET_KEY` | 8 | **Required** | Server-side Clerk key — `middleware.ts`'s `clerkMiddleware()`, `auth()`, `currentUser()` all need it. | Same place, same page. |
 | `NEWS_API_KEY` | 5 | Optional | News-derived question generation job. | [NewsAPI.org](https://newsapi.org) account. |
 | `ANTHROPIC_API_KEY` | 5 | Optional | AI-generated question job. | [console.anthropic.com](https://console.anthropic.com). |
 | `CRON_SECRET` | 5 | Optional locally, **effectively required in production** | Bearer-token check on the two `/api/jobs/*` routes (`lib/cronAuth.ts`). Vercel automatically sends `Authorization: Bearer $CRON_SECRET` on its own Cron-triggered requests when this is set — set it, or the two `vercel.json` cron entries hit publicly-guessable, unauthenticated URLs. | Any random string: `openssl rand -base64 24`. |
@@ -964,6 +1118,10 @@ Settings → Environment Variables, not committed anywhere.
 | `SENTRY_ORG`, `SENTRY_PROJECT`, `SENTRY_AUTH_TOKEN` | 7 | Optional, build-time only | Used by `withSentryConfig` in `next.config.mjs` to upload source maps during the Vercel build, so stack traces in Sentry show real source rather than minified bundles. Skipped silently if unset. | Sentry → Settings → Auth Tokens (needs `project:releases` scope); org/project slugs are in the URL of your Sentry project. |
 | `NEXT_PUBLIC_POSTHOG_KEY` | 7 | Optional (no-ops if unset) | PostHog project API key — enables the client-side provider in `components/analytics/PostHogProvider.tsx`. | PostHog → Project Settings → Project API Key. |
 | `NEXT_PUBLIC_POSTHOG_HOST` | 7 | Optional | PostHog ingestion host; defaults to `https://us.i.posthog.com` if unset. | PostHog project settings (differs for EU-region or self-hosted instances). |
+
+`AUTH_SECRET`/`APP_PASSWORD` (Phase 7) are gone — deleted along with the
+shared-password gate they belonged to (see "Auth" above), not carried
+forward as unused leftovers.
 
 **On `DIRECT_DATABASE_URL`:** this project doesn't actually add a second
 schema.prisma `directUrl` field for it — that would force every local/test
@@ -993,30 +1151,59 @@ whenever you personally run `prisma migrate deploy` against production.
    ```
 4. **Create a Vercel project**, importing the GitHub repo from step 1.
    Framework preset should auto-detect as Next.js.
-5. **Set every "Required" and any "Optional" env var you want** (see the
+5. **Create a Clerk app** ([clerk.com](https://clerk.com)). Copy its
+   publishable and secret keys into
+   `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`/`CLERK_SECRET_KEY`. If you want
+   email+password only (no social providers), turn off whichever social
+   connections Clerk enabled by default under
+   Configure → SSO Connections — that's the one piece of "skip social
+   login" that lives in the Clerk dashboard, not this codebase.
+6. **Set every "Required" and any "Optional" env var you want** (see the
    checklist above) in Vercel → Project → Settings → Environment Variables.
    Use the **pooled** Neon connection string for `DATABASE_URL` here
    (serverless functions open many short-lived connections; pooling is
    what makes that not fall over).
-6. **Create a Sentry project**, platform "Next.js". Copy the DSN into
+7. **Create a Sentry project**, platform "Next.js". Copy the DSN into
    `NEXT_PUBLIC_SENTRY_DSN`; optionally create an auth token
    (Settings → Auth Tokens, `project:releases` scope) for
    `SENTRY_AUTH_TOKEN` plus `SENTRY_ORG`/`SENTRY_PROJECT` so source maps
    upload on build.
-7. **Create a PostHog project**. Copy the project API key into
+8. **Create a PostHog project**. Copy the project API key into
    `NEXT_PUBLIC_POSTHOG_KEY` (and `NEXT_PUBLIC_POSTHOG_HOST` if not on
    PostHog's default US cloud).
-8. **Deploy** — either push to the connected branch, or click Deploy in the
+9. **Deploy** — either push to the connected branch, or click Deploy in the
    Vercel dashboard. Vercel reads `vercel.json` at the repo root and
    registers the two cron entries automatically (visible under the
    project's Cron Jobs tab after this first deploy).
-9. **Verify the deployed URL**: visiting it should redirect to `/login`;
-   sign in with `APP_PASSWORD`; walk BEGIN → write → submit → HISTORY and
-   confirm the new entry shows up on today's calendar cell.
-10. **Verify Sentry**: visit `<your-url>/api/debug-sentry` once (while
-    logged in) — it always throws on purpose. Check the Sentry project
+10. **Sign up for your real account**: visit the deployed URL, it should
+    redirect to `/sign-in`; use the "Sign up" link to create your real
+    account with your real email. This is also what lazily creates your
+    account's `User` row (`getOrCreateUser()` — see "Auth" above).
+11. **Migrate your pre-Clerk data**, from your own machine, against
+    production (use the **direct**, not pooled, Neon connection string —
+    same reasoning as step 3):
+    ```bash
+    DATABASE_URL="<neon-direct-connection-string>" \
+      npx tsx scripts/migrate-legacy-user.ts you@your-real-email.com
+    ```
+    Confirms in its own output how many sessions/entries/question-history
+    rows moved, and what streak/prep-duration got carried over — see
+    "Auth" above for exactly what this does and why it's a manual step.
+12. **Verify the deployed URL**: signed in as your real account, walk
+    BEGIN → write → submit → HISTORY and confirm your pre-migration
+    entries appear on their original calendar dates alongside anything new.
+13. **Verify data isolation with a second account**: open a private/
+    incognito window (so it doesn't share your session), sign up for a
+    second real account, and confirm BEGIN starts fresh (no submitted
+    entry for today) and HISTORY shows nothing — none of the first
+    account's entries, streak, or settings. This is the literal Phase 8
+    Definition of Done and needs two real Clerk accounts to check —
+    `tests/dataIsolation.test.ts` proves the same isolation logic
+    automatically, but can't stand in for actually doing this once by hand.
+14. **Verify Sentry**: visit `<your-url>/api/debug-sentry` once (while
+    signed in) — it always throws on purpose. Check the Sentry project
     dashboard for the event.
-11. **Verify PostHog**: click around the app for a minute, then check the
+15. **Verify PostHog**: click around the app for a minute, then check the
     PostHog project's Activity/Events view for `$pageview` events.
 
 ### Why Vercel Cron gets `GET` handlers, not just `POST`
@@ -1059,28 +1246,43 @@ throws, by design, so hitting it once after deploying is how you confirm
 Sentry is actually receiving events rather than just failing to error
 silently. It's `force-dynamic` (Next's build-time static prerendering pass
 would otherwise invoke the handler and fail the whole build on this route's
-intentional throw — see the comment in the file) and sits behind the same
-login as everything else, so it's not a public-anonymous crash button.
+intentional throw — see the comment in the file) and sits behind Clerk auth
+like everything else, so it's not a public-anonymous crash button.
 
 ## Known simplifications / not yet built
 
-- **Auth is a single shared password, not per-user accounts** — Phase 7's
-  login gate (see "Auth" above) proves you're *the* person who has the
-  password; it doesn't model more than one real user. There's still exactly
-  one `User` row (`lib/currentUser.ts`), with no ownership checks on any
-  route. Fine as long as this stays a personal, single-user app; would need
-  real per-user accounts (and per-route ownership checks) before a second
-  real person uses it.
+- **No social login, email-verification customization, or account-settings
+  UI** — explicitly out of scope for Phase 8 (see "Auth" above). Clerk's
+  default new-app configuration and prebuilt `<SignIn/>`/`<SignUp/>`/
+  `<UserButton/>` components are used unmodified; changing an account's
+  email, managing connected devices, etc. all go through whatever Clerk's
+  own `<UserButton/>` popover happens to expose, not anything built here.
+- **Global resources (`Category`, `Question`) still aren't account-scoped**
+  — real per-user accounts exist now, but `Category.enabledByDefault` and
+  the `Question` pool remain shared across every account (see the
+  Category-preferences and admin-review bullets below); Phase 8 added
+  ownership checks only to the resources that were already modeled as
+  per-user in the schema (`Session`, `Entry`, `User` itself), not a
+  redesign of what's shared vs. per-account.
+- **The legacy-migration script is single-use and manual** —
+  `scripts/migrate-legacy-user.ts` assumes exactly one pre-Clerk default
+  user to migrate, identified by its fixed placeholder email; it's not a
+  general "merge two accounts" tool, and running it twice against an
+  already-migrated (deleted) legacy row correctly fails with
+  `LegacyUserNotFoundError` rather than doing anything.
 - **Streak is tracked but not yet displayed** — `User.currentStreak` is
   computed and persisted on every submission (see "Streak semantics"), but
   no UI surfaces it yet; HISTORY still shows only the calendar, no streak
   number. `POST /api/sessions/:id/submit` already returns the value in its
   response, so wiring up a display is UI-only.
-- **Category preferences are global, not per-user** —
+- **Category preferences are global, not per-account** —
   `Category.enabledByDefault` is a single column on `Category`, toggled
-  directly by SETTINGS. Fine for a single-user app (see "Auth" above);
-  would need a `UserCategoryPreference` join table before a second real
-  user exists, since today one user's toggle affects everyone.
+  directly by SETTINGS. This was an acceptable simplification when there
+  was only ever one real user; as of Phase 8, with real multi-account
+  support, it's a live, real gap — any account's SETTINGS toggle changes
+  every other account's daily category pool too. Would need a
+  `UserCategoryPreference` join table (and updating `/start`/`/reroll`'s
+  category selection to read from it) to fix properly.
 - **HISTORY has no pagination or year view** — every submitted session is
   loaded on every page view. Fine at this project's real scale (at most
   one row per day, ever), but would need a bounded query (e.g. by visible
@@ -1097,13 +1299,15 @@ login as everything else, so it's not a public-anonymous crash button.
   the automatic post-expiry submission screen, so no early-submit button
   exists yet. The `/submit` endpoint itself has no deadline gate, so
   adding the button later is a UI-only change.
-- **Review page has no *extra* auth beyond the app-wide login** —
-  `/admin/questions` sits behind the same shared-password gate as every
-  other page (see "Auth" above) but nothing further; anyone who has logged
-  in — the one real user, by design — can publish AI-generated/news-derived
-  questions straight to the approved pool from this page. Worth calling out
-  separately since it can publish content, not just view it, but not a real
-  risk while there's only one legitimate person with the password.
+- **Review page has no *extra* auth beyond "some Clerk account signed
+  in"** — `/admin/questions` sits behind the same Clerk auth as every other
+  page (see "Auth" above) but has no admin-role concept: **any**
+  authenticated account, not a designated owner, can publish
+  AI-generated/news-derived questions straight to the approved pool from
+  this page. Harmless while you're the only real account, but a real gap
+  the moment a second real account exists — worth calling out separately
+  since it can publish content, not just view it. Would need a role/
+  permission check (Clerk supports custom roles) before that's safe.
 - **Scheduler is now wired up, but only on Vercel** — `vercel.json`'s
   `crons` entries hit `GET /api/jobs/news-questions` and
   `GET /api/jobs/ai-questions` daily once deployed (see "Deployment"

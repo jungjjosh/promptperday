@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 import { SessionStatus } from "@prisma/client";
 import { POST as submitSession } from "@/app/api/sessions/[id]/submit/route";
 import { computeNextStreak, previousDateKey } from "@/lib/streak";
+import { setMockClerkUserId } from "./clerkMock";
 import { createRawSession, createTestUser, prisma, resetDb } from "./helpers";
 
 function jsonRequest(url: string, method: string, body?: unknown) {
@@ -34,11 +35,13 @@ beforeEach(async () => {
 
 afterEach(() => {
   vi.useRealTimers();
+  setMockClerkUserId(null);
 });
 
 describe("streak counting", () => {
   it("increments across normal consecutive local days", async () => {
     const user = await createTestUser({ timezone: TZ });
+    setMockClerkUserId(user.id);
 
     const day1 = await createRawSession({
       userId: user.id,
@@ -67,6 +70,7 @@ describe("streak counting", () => {
 
   it("resets to 1 (not a continued increment) after a missed day", async () => {
     const user = await createTestUser({ timezone: TZ });
+    setMockClerkUserId(user.id);
 
     const day1 = await createRawSession({
       userId: user.id,
@@ -93,6 +97,7 @@ describe("streak counting", () => {
 
   it("attributes a session begun before midnight and submitted after to the day it started", async () => {
     const user = await createTestUser({ timezone: TZ });
+    setMockClerkUserId(user.id);
 
     // Day A: streak = 1
     const dayA = await createRawSession({
@@ -124,6 +129,7 @@ describe("streak counting", () => {
     // previousDateKey's comment in lib/streak.ts) — this test would fail
     // under that implementation.
     const user = await createTestUser({ timezone: TZ });
+    setMockClerkUserId(user.id);
 
     const beforeDst = await createRawSession({
       userId: user.id,

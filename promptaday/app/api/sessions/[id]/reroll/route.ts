@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { auth } from "@clerk/nextjs/server";
 import { SessionStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import {
@@ -25,6 +26,13 @@ export async function POST(
   if (!session) {
     return NextResponse.json({ error: "Session not found" }, { status: 404 });
   }
+
+  // Ownership check (Phase 8) — see grace/route.ts's comment.
+  const { userId: clerkUserId } = await auth();
+  if (!clerkUserId || session.userId !== clerkUserId) {
+    return NextResponse.json({ error: "Session not found" }, { status: 404 });
+  }
+
   if (session.status === SessionStatus.SUBMITTED) {
     return NextResponse.json(
       { error: "Session already submitted" },

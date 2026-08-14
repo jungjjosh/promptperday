@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
+import { UserButton } from "@clerk/nextjs";
 
 const TABS = [
   { href: "/", label: "Begin" },
@@ -12,15 +13,9 @@ const TABS = [
 
 export default function NavTabs() {
   const pathname = usePathname();
-  const router = useRouter();
 
-  if (pathname === "/login") return null;
-
-  async function handleLogout() {
-    await fetch("/api/auth/logout", { method: "POST" });
-    router.push("/login");
-    router.refresh();
-  }
+  if (pathname === "/sign-in" || pathname.startsWith("/sign-in/")) return null;
+  if (pathname === "/sign-up" || pathname.startsWith("/sign-up/")) return null;
 
   return (
     <nav
@@ -55,22 +50,10 @@ export default function NavTabs() {
           );
         })}
       </div>
-      <button
-        onClick={handleLogout}
-        style={{
-          background: "none",
-          border: "none",
-          cursor: "pointer",
-          color: "inherit",
-          opacity: 0.6,
-          textTransform: "uppercase",
-          fontSize: "0.85rem",
-          letterSpacing: "0.04em",
-          padding: 0,
-        }}
-      >
-        Log out
-      </button>
+      {/* Clerk's own prebuilt component — sign-out lives in its popover.
+          No custom account-settings UI is built on top of it (out of
+          scope for Phase 8; see CLAUDE.md). */}
+      <UserButton afterSignOutUrl="/sign-in" />
     </nav>
   );
 }

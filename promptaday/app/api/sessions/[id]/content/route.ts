@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { auth } from "@clerk/nextjs/server";
 import { prisma } from "@/lib/prisma";
 
 const GRACE_SECONDS = 60;
@@ -9,6 +10,12 @@ export async function PATCH(
 ) {
   const session = await prisma.session.findUnique({ where: { id: params.id } });
   if (!session) {
+    return NextResponse.json({ error: "Session not found" }, { status: 404 });
+  }
+
+  // Ownership check (Phase 8) — see grace/route.ts's comment.
+  const { userId: clerkUserId } = await auth();
+  if (!clerkUserId || session.userId !== clerkUserId) {
     return NextResponse.json({ error: "Session not found" }, { status: 404 });
   }
 

@@ -13,6 +13,10 @@ export default defineConfig({
   test: {
     environment: "node",
     globalSetup: ["./tests/globalSetup.ts"],
+    // Registers a mock for @clerk/nextjs/server (see tests/setupClerkMock.ts)
+    // before any test file's own imports run, so route handlers that call
+    // auth()/currentUser() work in tests without a real Clerk project.
+    setupFiles: ["./tests/setupClerkMock.ts"],
     testTimeout: 20_000,
     hookTimeout: 20_000,
     // All test files share one real Postgres database (see tests/helpers.ts
@@ -23,8 +27,6 @@ export default defineConfig({
     env: {
       DATABASE_URL: process.env.DATABASE_URL ?? "",
       NEWS_API_KEY: process.env.NEWS_API_KEY ?? "",
-      AUTH_SECRET: process.env.AUTH_SECRET ?? "",
-      APP_PASSWORD: process.env.APP_PASSWORD ?? "",
     },
   },
 });

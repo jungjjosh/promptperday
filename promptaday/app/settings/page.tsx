@@ -1,11 +1,11 @@
 import { prisma } from "@/lib/prisma";
-import { getOrCreateDefaultUser } from "@/lib/currentUser";
+import { getOrCreateUser } from "@/lib/currentUser";
 import SettingsForm from "@/components/settings/SettingsForm";
 
 export const dynamic = "force-dynamic";
 
 export default async function SettingsPage() {
-  const user = await getOrCreateDefaultUser();
+  const user = await getOrCreateUser();
   const categories = await prisma.category.findMany({ orderBy: { name: "asc" } });
 
   return (
