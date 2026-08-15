@@ -1107,7 +1107,7 @@ project's Settings → Environment Variables, not committed anywhere.
 | Variable | Phase | Required? | Purpose | Where to get it |
 |---|---|---|---|---|
 | `DATABASE_URL` | 1 | **Required** | Postgres connection the app queries through Prisma at runtime. | Local: your Homebrew Postgres. Production: Neon's **pooled** connection string (see note below). |
-| `DIRECT_DATABASE_URL`-equivalent | 1 | Only when migrating production | Not a schema/env var in this project (see note below) — the **direct** (unpooled) Neon connection string, used only when you personally run `prisma migrate deploy` against production. | Neon dashboard, same project as above. |
+| `DATABASE_URL_UNPOOLED` | 1 | Only when migrating production | Not a schema/env var this app itself reads (see note below) — Neon's name for the **direct** (unpooled) connection string, used only when you personally run `prisma migrate deploy`/`db seed` against production. | `npx neon env pull -e DATABASE_URL -e DATABASE_URL_UNPOOLED --file .env.neon` (this project's actual convention — see "Neon project already provisioned" below), or the Neon dashboard. |
 | `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | 8 | **Required** | Client-side Clerk key — `<ClerkProvider>`, `<SignIn/>`/`<SignUp/>`, `<UserButton/>` all need it. Without a *real* one (a syntactically-valid placeholder is enough to build, not to actually authenticate anyone — see "Auth" above), sign-in/sign-up won't work. | Clerk dashboard → your app → API Keys. |
 | `CLERK_SECRET_KEY` | 8 | **Required** | Server-side Clerk key — `middleware.ts`'s `clerkMiddleware()`, `auth()`, `currentUser()` all need it. | Same place, same page. |
 | `NEWS_API_KEY` | 5 | Optional | News-derived question generation job. | [NewsAPI.org](https://newsapi.org) account. |
@@ -1123,32 +1123,40 @@ project's Settings → Environment Variables, not committed anywhere.
 shared-password gate they belonged to (see "Auth" above), not carried
 forward as unused leftovers.
 
-**On `DIRECT_DATABASE_URL`:** this project doesn't actually add a second
+**On `DATABASE_URL_UNPOOLED`:** this project doesn't actually add a second
 schema.prisma `directUrl` field for it — that would force every local/test
 `.env` file to define a second Postgres URL just to satisfy Prisma's
 "env var referenced but undefined" check at `generate`/`migrate` time, for a
 distinction (pooled vs. direct) that only matters once you're on a real
 pooled host. Simpler to keep `datasource.url` as the single `DATABASE_URL`
 it's always been, and handle pooled-vs-direct purely as a *runbook*
-instruction (below): use the pooled string for the *deployed app's*
-`DATABASE_URL` in Vercel, and the direct string on your own machine
-whenever you personally run `prisma migrate deploy` against production.
+instruction (below): use the pooled string (`DATABASE_URL`) for the
+*deployed app's* `DATABASE_URL` in Vercel, and the direct string
+(`DATABASE_URL_UNPOOLED`) on your own machine whenever you personally run
+`prisma migrate deploy` against production.
 
 ### Runbook
 
 1. **Push this repo to GitHub** (or GitLab/Bitbucket) — Vercel imports from
    a Git provider, not a local folder. `git remote add origin <url> && git
    push -u origin main`.
-2. **Create a Neon project** ([neon.tech](https://neon.tech), free tier is
-   plenty at this scale). Copy both connection strings it gives you: the
-   **pooled** one (hostname ends in `-pooler`) and the **direct** one.
+2. **Create a Neon project** — either via the [neon.tech](https://neon.tech)
+   dashboard, or via the Neon CLI (`npx neon projects create --name
+   promptperday --org-id <org-id>`; `npx neon orgs list` first if you don't
+   know your org id). Free tier is plenty at this scale. **Already done for
+   this project** — see "Neon project already provisioned" below for the
+   exact commands used and where the resulting connection strings live.
 3. **Run the production migration once, from your own machine**, using the
-   *direct* connection string (Prisma Migrate's advisory locks can hang
-   over a transaction-mode pooler, which is what the `-pooler` host is):
+   *direct* (unpooled) connection string (Prisma Migrate's advisory locks
+   can hang over a transaction-mode pooler, which is what the pooled host
+   is):
    ```bash
    DATABASE_URL="<neon-direct-connection-string>" npx prisma migrate deploy
    DATABASE_URL="<neon-direct-connection-string>" npx prisma db seed
    ```
+   **Already done for this project** (see below) — a fresh checkout only
+   needs to repeat this if the schema changes and this exact database
+   hasn't been migrated yet.
 4. **Create a Vercel project**, importing the GitHub repo from step 1.
    Framework preset should auto-detect as Next.js.
 5. **Create a Clerk app** ([clerk.com](https://clerk.com)). Copy its
@@ -1205,6 +1213,57 @@ whenever you personally run `prisma migrate deploy` against production.
     dashboard for the event.
 15. **Verify PostHog**: click around the app for a minute, then check the
     PostHog project's Activity/Events view for `$pageview` events.
+
+### Neon project already provisioned
+
+Unlike Vercel/Clerk/Sentry/PostHog (still pending — see "What this needs,
+and who does it" above), a real Neon project for this app already exists,
+set up via the Neon CLI (`npx neon ...`, already authenticated on this
+machine) rather than the dashboard:
+
+```bash
+npx neon orgs list --output json                     # one org, used automatically
+npx neon projects list --org-id <org-id> --output json  # found the existing "promptperday" project — reused it, didn't create a new one
+npx neon env pull --project-id <project-id> \
+  -e DATABASE_URL -e DATABASE_URL_UNPOOLED --file .env.neon
+DATABASE_URL="$DATABASE_URL_UNPOOLED" npx prisma migrate deploy   # against the direct connection, per the runbook note above
+DATABASE_URL="$DATABASE_URL_UNPOOLED" npx prisma db seed
+```
+
+Two deliberate deviations from the generic Neon setup flow, both because
+this project already has stronger opinions than the generic flow assumes:
+
+- **`.env.neon`, not `.env`.** `neon env pull` defaults to writing into
+  `.env` if one already exists — which here would silently replace the
+  local Homebrew Postgres `DATABASE_URL` that "Environment setup" above
+  documents as the deliberate local-dev database, breaking `npm run dev`
+  locally. `.env.neon` (already covered by the `.env*` `.gitignore` glob,
+  never read by Next.js or dotenv automatically) holds the Neon connection
+  strings purely as a reference for one-off production commands like the
+  migration above — the same role the runbook already described "the Neon
+  dashboard" playing, just sourced from a file instead of copy-pasted.
+- **No `@neondatabase/serverless` / `@prisma/adapter-neon` driver
+  adapter.** Neon's own quickstart flow suggests installing these for
+  edge/serverless deployments, but this project pinned Prisma 6
+  specifically to avoid needing a driver adapter at all (see "Why Prisma
+  6, not 7" above) — Vercel's Node.js serverless functions (this project's
+  deployment target, not the Edge runtime) work fine with the standard
+  `DATABASE_URL`-based `new PrismaClient()` over Neon's pooled connection
+  string. Adding the adapter now would reintroduce exactly the ceremony
+  that pin was chosen to avoid, for no capability this project needs.
+
+Confirmed working end-to-end: `prisma migrate deploy` applied all three
+existing migrations to the (previously empty) Neon database, `prisma db
+seed` populated the three categories and 30 questions, and a direct query
+through `@prisma/client` against the **pooled** `DATABASE_URL` — the same
+one Vercel's serverless functions will use — returned them correctly.
+
+The `npx neon` commands above also auto-fetched Neon's own agent-skill
+reference docs into `.agents/skills/{neon,neon-postgres}/SKILL.md`, tracked
+by `skills-lock.json` (the same pattern as `package-lock.json` — a hash-
+pinned lock file, not app code). Committed rather than gitignored, so a
+future session in this repo has the same Neon CLI context available
+without re-fetching it.
 
 ### Why Vercel Cron gets `GET` handlers, not just `POST`
 
